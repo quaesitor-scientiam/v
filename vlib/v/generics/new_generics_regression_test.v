@@ -23,8 +23,6 @@ fn testsuite_begin() {
 }
 
 fn test_new_generic_solver_does_not_regress_silently() {
-	run_new_generic_solver_tests('vlib/math/vec', '${os.quoted_path(vexe)} -new-generic-solver test vlib/math/vec',
-		expected_summary_vec, expected_summsvc_vec, failing_math_vec_tests[..])
 	run_new_generic_solver_tests('vlib/flag', '${os.quoted_path(vexe)} -new-generic-solver test vlib/flag/',
 		expected_summary_flag, expected_summsvc_flag, failing_flag_tests[..])
 	run_new_generic_solver_tests('vlib/v/tests/generics/', '${os.quoted_path(vexe)} -new-generic-solver test vlib/v/tests/generics/',
@@ -36,7 +34,7 @@ fn run_new_generic_solver_tests(root_label string, test_cmd string, expected_sum
 	log.info('>>> running ${term.colorize(term.magenta, test_cmd)} ...')
 	res := os.execute(test_cmd)
 	log.info('>>> done running ${test_cmd} ; exit_code: ${res.exit_code}')
-	assert res.exit_code != 0
+	assert res.exit_code != 0, 'test command expected to fail, but it passed! time to remove those cases from ${@FILE}: test_cmd: ${test_cmd}'
 
 	res_lines := res.output.split_into_lines()
 	if vtrace_output {
@@ -78,8 +76,6 @@ fn run_new_generic_solver_tests(root_label string, test_cmd string, expected_sum
 
 const expected_summsvc_generics = 'Summary for all V _test.v files: 53 failed, 208 passed, 261 total.'
 const expected_summary_generics = 'Summary for all V _test.v files: 52 failed, 209 passed, 261 total.'
-const expected_summsvc_vec = 'Summary for all V _test.v files: 3 failed, 3 total.'
-const expected_summary_vec = 'Summary for all V _test.v files: 3 failed, 3 total.'
 const expected_summsvc_flag = 'Summary for all V _test.v files: 14 failed, 5 passed, 19 total.'
 const expected_summary_flag = 'Summary for all V _test.v files: 14 failed, 5 passed, 19 total.'
 const failing_tests = [
@@ -135,11 +131,6 @@ const failing_tests = [
 	'vlib/v/tests/generics/generics_struct_with_inconsistent_generic_types_1_test.v',
 	'vlib/v/tests/generics/generics_test.v',
 	'vlib/v/tests/generics/generics_with_generics_fn_return_generics_map_type_test.v',
-]!
-const failing_math_vec_tests = [
-	'vlib/math/vec/vec2_test.v',
-	'vlib/math/vec/vec3_test.v',
-	'vlib/math/vec/vec4_test.v',
 ]!
 
 const failing_flag_tests = [
