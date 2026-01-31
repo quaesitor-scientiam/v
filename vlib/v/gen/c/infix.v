@@ -455,9 +455,7 @@ fn (mut g Gen) infix_expr_cmp_op(node ast.InfixExpr) {
 		if left.unaliased_sym.is_builtin() {
 			method_name = 'builtin__${method_name}'
 		}
-		if !g.pref.new_generic_solver {
-			method_name = g.generic_fn_name(concrete_types, method_name)
-		}
+		method_name = g.generic_fn_name(concrete_types, method_name)
 		g.write(method_name)
 		if node.op in [.lt, .ge] {
 			g.write2('(', '*'.repeat(left.typ.nr_muls()))
@@ -970,9 +968,7 @@ fn (mut g Gen) infix_expr_arithmetic_op(node ast.InfixExpr) {
 	right := g.unwrap(g.type_resolver.get_type_or_default(node.right, node.right_type))
 	if left.sym.info is ast.Struct && left.sym.info.generic_types.len > 0 {
 		mut method_name := left.sym.cname + '_' + util.replace_op(node.op.str())
-		if !g.pref.new_generic_solver {
-			method_name = g.generic_fn_name(left.sym.info.concrete_types, method_name)
-		}
+		method_name = g.generic_fn_name(left.sym.info.concrete_types, method_name)
 		if left.sym.is_builtin() {
 			method_name = 'builtin__${method_name}'
 		}
@@ -999,7 +995,7 @@ fn (mut g Gen) infix_expr_arithmetic_op(node ast.InfixExpr) {
 				method_name = 'builtin__${method_name}'
 			}
 			if left.unaliased_sym.info is ast.Struct
-				&& left.unaliased_sym.info.generic_types.len > 0 && !g.pref.new_generic_solver {
+				&& left.unaliased_sym.info.generic_types.len > 0 {
 				method_name = g.generic_fn_name(left.unaliased_sym.info.concrete_types,
 					method_name)
 			}

@@ -506,6 +506,7 @@ pub fn (mut g Generics) generic_fn_decl(mut node ast.FnDecl) []ast.Stmt {
 			...node
 		}
 		new_node = g.stmt(mut new_node) as ast.FnDecl
+		is_op_method := new_node.name in ['+', '-', '*', '/', '%', '<', '==']
 		new_node = ast.FnDecl{
 			...new_node
 			name:          if node.is_method {
@@ -513,8 +514,17 @@ pub fn (mut g Generics) generic_fn_decl(mut node ast.FnDecl) []ast.Stmt {
 			} else {
 				g.concrete_name(new_node.name, concrete_types)
 			}
-			ninstances:    0
-			generic_names: []
+			ninstances:    if is_op_method { 1 } else { 0 }
+			generic_names: if is_op_method { node.generic_names } else { [] }
+		}
+		// For operator methods on generic structs, register concrete types
+		// under the new fkey (with concrete receiver type) so the C gen can
+		// look them up when generating the function definition with the
+		// correct name suffix.
+		if is_op_method && new_node.is_method {
+			fk := new_node.fkey()
+			g.table.register_fn_generic_types(fk)
+			g.table.register_fn_concrete_types(fk, concrete_types)
 		}
 		if new_node.is_method {
 			mut sym := g.table.sym(new_node.receiver.typ)
@@ -541,7 +551,7 @@ pub fn (mut g Generics) generic_fn_decl(mut node ast.FnDecl) []ast.Stmt {
 				receiver_type:                  new_node.receiver.typ
 				name:                           new_node.name
 				params:                         new_node.params
-				generic_names:                  []
+				generic_names:                  if is_op_method { node.generic_names } else { [] }
 				is_conditional:                 new_node.is_conditional
 				ctdefine_idx:                   new_node.ctdefine_idx
 				is_expand_simple_interpolation: new_node.is_expand_simple_interpolation
