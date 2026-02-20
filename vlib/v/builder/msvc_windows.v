@@ -672,13 +672,21 @@ pub fn (mut v Builder) msvc_string_flags(cflags []cflag.CFlag) MsvcStringFlags {
 				}
 			}
 		} else if flag.name == '-I' {
-			parts := split_quoted_flags(flag.value)
-			if parts.len == 0 {
-				continue
-			}
-			if parts.len == 1 && !parts[0].starts_with('-') {
-				inc_paths << '/I"${os.real_path(parts[0])}"'
+			should_split := flag.value.contains(' -I') || flag.value.contains(' -L')
+				|| flag.value.contains(' -l') || flag.value.contains(' -Wl,')
+				|| flag.value.contains(' "-I') || flag.value.contains(' "-L')
+				|| flag.value.contains(' "-l') || flag.value.contains(' "-Wl,')
+				|| flag.value.contains('\t-I') || flag.value.contains('\t-L')
+				|| flag.value.contains('\t-l') || flag.value.contains('\t-Wl,')
+				|| flag.value.contains('\t"-I') || flag.value.contains('\t"-L')
+				|| flag.value.contains('\t"-l') || flag.value.contains('\t"-Wl,')
+			if !should_split {
+				inc_paths << '/I"${os.real_path(flag.value)}"'
 			} else {
+				parts := split_quoted_flags(flag.value)
+				if parts.len == 0 {
+					continue
+				}
 				for part in parts {
 					if part == '' {
 						continue
@@ -698,14 +706,22 @@ pub fn (mut v Builder) msvc_string_flags(cflags []cflag.CFlag) MsvcStringFlags {
 		} else if flag.name == '-D' {
 			defines << '/D${flag.value}'
 		} else if flag.name == '-L' {
-			parts := split_quoted_flags(flag.value)
-			if parts.len == 0 {
-				continue
-			}
-			if parts.len == 1 && !parts[0].starts_with('-') {
-				lib_paths << parts[0]
-				lib_paths << parts[0] + os.path_separator + 'msvc'
+			should_split := flag.value.contains(' -I') || flag.value.contains(' -L')
+				|| flag.value.contains(' -l') || flag.value.contains(' -Wl,')
+				|| flag.value.contains(' "-I') || flag.value.contains(' "-L')
+				|| flag.value.contains(' "-l') || flag.value.contains(' "-Wl,')
+				|| flag.value.contains('\t-I') || flag.value.contains('\t-L')
+				|| flag.value.contains('\t-l') || flag.value.contains('\t-Wl,')
+				|| flag.value.contains('\t"-I') || flag.value.contains('\t"-L')
+				|| flag.value.contains('\t"-l') || flag.value.contains('\t"-Wl,')
+			if !should_split {
+				lib_paths << flag.value
+				lib_paths << flag.value + os.path_separator + 'msvc'
 			} else {
+				parts := split_quoted_flags(flag.value)
+				if parts.len == 0 {
+					continue
+				}
 				for part in parts {
 					if part == '' {
 						continue
