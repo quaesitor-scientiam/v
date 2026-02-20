@@ -373,6 +373,16 @@ pub fn (mut v Builder) cc_msvc() {
 	if v.pref.ldflags != '' {
 		a << v.pref.ldflags.trim_space()
 	}
+	// Remove stray quoted gcc-style -I/-L/-l tokens (e.g. "-I...") that can leak into MSVC args.
+	mut filtered_args := []string{cap: a.len}
+	for arg in a {
+		mut s := arg.trim_space()
+		if s.len >= 3 && s[0] == `"` && s[1] == `-` && s[2] in [`I`, `L`, `l`] {
+			continue
+		}
+		filtered_args << arg
+	}
+	a = filtered_args.clone()
 	v.dump_c_options(a)
 	args := '\xEF\xBB\xBF' + a.join(' ') // write a BOM to indicate the utf8 encoding of the file
 	// write args to a file so that we dont smash createprocess
@@ -662,12 +672,57 @@ pub fn (mut v Builder) msvc_string_flags(cflags []cflag.CFlag) MsvcStringFlags {
 				}
 			}
 		} else if flag.name == '-I' {
-			inc_paths << '/I"${os.real_path(flag.value)}"'
+			parts := split_quoted_flags(flag.value)
+			if parts.len == 0 {
+				continue
+			}
+			if parts.len == 1 && !parts[0].starts_with('-') {
+				inc_paths << '/I"${os.real_path(parts[0])}"'
+			} else {
+				for part in parts {
+					if part == '' {
+						continue
+					}
+					if apply_gnu_flag_to_msvc(part, mut inc_paths, mut lib_paths, mut
+						real_libs)
+					{
+						continue
+					}
+					if !part.starts_with('-') {
+						inc_paths << '/I"${os.real_path(strip_quotes(part))}"'
+					} else {
+						other_flags << strip_quotes(part)
+					}
+				}
+			}
 		} else if flag.name == '-D' {
 			defines << '/D${flag.value}'
 		} else if flag.name == '-L' {
-			lib_paths << flag.value
-			lib_paths << flag.value + os.path_separator + 'msvc'
+			parts := split_quoted_flags(flag.value)
+			if parts.len == 0 {
+				continue
+			}
+			if parts.len == 1 && !parts[0].starts_with('-') {
+				lib_paths << parts[0]
+				lib_paths << parts[0] + os.path_separator + 'msvc'
+			} else {
+				for part in parts {
+					if part == '' {
+						continue
+					}
+					if apply_gnu_flag_to_msvc(part, mut inc_paths, mut lib_paths, mut
+						real_libs)
+					{
+						continue
+					}
+					if !part.starts_with('-') {
+						lib_paths << part
+						lib_paths << part + os.path_separator + 'msvc'
+					} else {
+						other_flags << strip_quotes(part)
+					}
+				}
+			}
 			// The above allows putting msvc specific .lib files in a subfolder msvc/ ,
 			// where gcc will NOT find them, but cl will do...
 			// Note: gcc is smart enough to not need .lib files at all in most cases, the .dll is enough.
@@ -700,6 +755,16 @@ pub fn (mut v Builder) msvc_string_flags(cflags []cflag.CFlag) MsvcStringFlags {
 	for l in lib_paths {
 		lpaths << '/LIBPATH:"${os.real_path(l)}"'
 	}
+	// Drop only stray quoted gcc-style -I/-L/-l tokens that leak into MSVC args.
+	mut filtered_other_flags := []string{cap: other_flags.len}
+	for of in other_flags {
+		ofs := of.trim_space()
+		if ofs.len >= 3 && ofs[0] == `"` && ofs[1] == `-` && ofs[2] in [`I`, `L`, `l`] {
+			continue
+		}
+		filtered_other_flags << of
+	}
+	other_flags = filtered_other_flags.clone()
 	return MsvcStringFlags{
 		real_libs:   real_libs
 		inc_paths:   inc_paths
