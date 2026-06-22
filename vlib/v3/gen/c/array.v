@@ -32,6 +32,10 @@ fn array_fixed_type(t types.Type) ?types.ArrayFixed {
 fn (mut g FlatGen) gen_array_literal_value(node flat.Node, elem_type types.Type) {
 	c_elem := g.tc.c_type(elem_type)
 	count := node.children_count
+	if count == 0 {
+		g.write('array_new(sizeof(${c_elem}), 0, 0)')
+		return
+	}
 	g.write('new_array_from_c_array(${count}, ${count}, sizeof(${c_elem}), (${c_elem}[]){')
 	for i in 0 .. count {
 		if i > 0 {
@@ -301,10 +305,19 @@ fn (mut g FlatGen) array_method_fallback(method string) string {
 	return best_mname
 }
 
-fn (mut g FlatGen) gen_map_delete(node flat.Node, fn_node &flat.Node, m types.Map) {
+fn (mut g FlatGen) gen_map_ref_arg(base_id flat.NodeId, base_type types.Type) {
+	if base_type is types.Pointer {
+		g.gen_expr(base_id)
+	} else {
+		g.write('&')
+		g.gen_expr(base_id)
+	}
+}
+
+fn (mut g FlatGen) gen_map_delete(node flat.Node, fn_node &flat.Node, m types.Map, base_type types.Type) {
 	c_key := g.tc.c_type(m.key_type)
-	g.write('map__delete(&')
-	g.gen_expr(g.a.child(fn_node, 0))
+	g.write('map__delete(')
+	g.gen_map_ref_arg(g.a.child(fn_node, 0), base_type)
 	g.write(', &(${c_key}[]){')
 	g.gen_expr(g.a.child(&node, 1))
 	g.write('})')
@@ -328,9 +341,9 @@ fn (mut g FlatGen) gen_index_assign(node flat.Node) {
 			}
 			g.gen_expr(base_id)
 			g.write(', &(${c_key}[]){')
-			g.gen_expr(g.a.child(&lhs, 1))
+			g.gen_expr_with_expected_type(g.a.child(&lhs, 1), clean_base.key_type)
 			g.write('}, &(${c_val}[]){')
-			g.gen_expr(g.a.child(&node, 1))
+			g.gen_expr_with_expected_type(g.a.child(&node, 1), clean_base.value_type)
 			g.writeln('});')
 			return
 		}
@@ -370,7 +383,7 @@ fn (mut g FlatGen) gen_index_assign(node flat.Node) {
 			g.write(', ')
 			g.gen_expr(g.a.child(&lhs, 1))
 			g.write(', &(${c_elem}[]){')
-			g.gen_expr(g.a.child(&node, 1))
+			g.gen_expr_with_expected_type(g.a.child(&node, 1), arr_type.elem_type)
 			g.writeln('});')
 			return
 		}

@@ -30,7 +30,7 @@ const o_wronly_creat_trunc = 0x601 // O_WRONLY | O_CREAT | O_TRUNC on Darwin
 fn main() {
 	args := os.args[1..]
 	if args.len == 0 {
-		eprintln('usage: v3 <file.v> [-o output] [-b c|arm64]')
+		eprintln('usage: v3 <file.v> [-o output|file.c] [-b c|arm64]')
 		exit(1)
 	}
 
@@ -71,9 +71,13 @@ fn main() {
 	}
 
 	mut bin_file := ''
+	mut c_only := false
 	if output_file == '' {
 		bin_file = input_file.all_before_last('.v')
 		output_file = bin_file + '.c'
+	} else if backend == 'c' && output_file.ends_with('.c') {
+		c_only = true
+		bin_file = output_file.all_before_last('.c')
 	} else {
 		bin_file = output_file
 		output_file = bin_file + '.c'
@@ -129,8 +133,13 @@ fn main() {
 	}
 	b.step('check')
 
+	// Mark used functions (dead-code elimination). This is done before transform
+	// so the transformer can skip function bodies that the C backend will prune.
+	used_fns := markused.mark_used(a, pre_tc)
+	b.step('markused')
+
 	// Transform (match lowering, string/in lowering, etc.)
-	transform.transform(mut a, &pre_tc)
+	transform.transform_with_used(mut a, &pre_tc, used_fns)
 	b.step('transform')
 
 	// Reuse the pre-transform checker for metadata only. Transform does not add
@@ -142,10 +151,6 @@ fn main() {
 		pre_tc.diagnostic_files[uf] = true
 	}
 	b.step('annotate types')
-
-	// Mark used functions (dead-code elimination)
-	used_fns := markused.mark_used(a, pre_tc)
-	b.step('markused')
 
 	if backend == 'arm64' {
 		// SSA + ARM64 native backend
@@ -173,6 +178,10 @@ fn main() {
 		}
 		gen_step_name := if g.was_parallel() { 'gen C/write (parallel)' } else { 'gen C/write' }
 		b.step(gen_step_name)
+		if c_only {
+			b.print_report()
+			return
+		}
 
 		opt_flag := if is_prod { '-O2 ' } else { '' }
 		warn_flags := if is_strict {

@@ -27,6 +27,26 @@ fn (t &Transformer) resolve_variant(sum_name string, variant string) string {
 }
 
 fn (t &Transformer) resolve_sum_name(sum_name string) string {
+	if sum_name.len == 0 {
+		return sum_name
+	}
+	if isnil(t.sum_cache) {
+		return t.resolve_sum_name_uncached(sum_name)
+	}
+	mut c := t.sum_cache
+	if c.module != t.cur_module {
+		c.module = t.cur_module
+		c.entries.clear()
+	}
+	if cached := c.entries[sum_name] {
+		return cached
+	}
+	result := t.resolve_sum_name_uncached(sum_name)
+	c.entries[sum_name] = result
+	return result
+}
+
+fn (t &Transformer) resolve_sum_name_uncached(sum_name string) string {
 	if sum_name in t.sum_types {
 		return sum_name
 	}
@@ -443,8 +463,7 @@ fn (mut t Transformer) wrap_sum_value(expr_id flat.NodeId, target_sum string) fl
 		return t.make_sum_literal(resolved_sum, matched_variant, inner)
 	}
 	if ref_variant {
-		ref_inner := t.ensure_sum_variant_ref(inner, matched_variant)
-		return t.make_sum_literal(resolved_sum, matched_variant, ref_inner)
+		return t.make_sum_literal(resolved_sum, matched_variant, inner)
 	}
 	start := t.a.children.len
 	t.a.children << inner
@@ -482,8 +501,9 @@ fn (mut t Transformer) make_sum_literal(sum_name string, variant string, value f
 	qvariant := t.resolve_variant(sum_name, variant)
 	typ_field := t.make_sum_literal_field('typ', t.make_int_literal(t.sum_type_index(sum_name,
 		qvariant)), 'int')
-	value_type := if t.variant_references_sum(qvariant, sum_name) && !qvariant.starts_with('&') {
-		'&${qvariant}'
+	raw_value_type := t.node_type(value)
+	value_type := if raw_value_type.starts_with('&') {
+		raw_value_type
 	} else {
 		qvariant
 	}

@@ -123,7 +123,6 @@ source to binary uses no external tools.
 | type checker   | 974   |
 | universe       | 97    |
 | scopes         | 34    |
-| C gen (AST)    | 669   |
 | SSA IR+build   | 1,510 |
 | SSA optimize   | 474   |
 | ARM64 gen      | 873   |
@@ -138,7 +137,7 @@ source to binary uses no external tools.
 | scanner        | 593   |
 | token          | 338   |
 | bench          | 81    |
-| **total**      | **~18,300** |
+| **total**      | **~16,300** |
 
 ## Performance
 
@@ -181,7 +180,7 @@ function pointers.
 | cc        | 79 ms    | 17,312 KB |
 | **total** | **~259 ms** | **17,312 KB** |
 
-All v3 steps (parse + check + transform + annotate types + markused + gen +
+All v3 steps (parse + check + markused + transform + annotate types + gen +
 write) complete in ~8 ms for hello world, including 38 builtin files, and
 ~157 ms for `test.v` with the C backend.
 
@@ -204,14 +203,14 @@ falls back to `cc`.
 
 | Phase          | Time      | Peak RSS |
 |----------------|----------:|---------:|
-| parse          | 47.33 ms  | 73 MB    |
-| check          | 43.92 ms  | 131 MB   |
-| transform      | 94.83 ms  | 274 MB   |
-| annotate types | 30.46 ms  | 307 MB   |
-| markused       | 48.53 ms  | 354 MB   |
-| gen C/write    | 94.67 ms  | 455 MB   |
-| cc             | 707.84 ms | 455 MB   |
-| **total**      | **1,092.92 ms** | **455 MB** |
+| parse          | 59.47 ms  | 73 MB    |
+| check          | 46.57 ms  | 126 MB   |
+| markused       | 39.81 ms  | 150 MB   |
+| transform      | 70.79 ms  | 277 MB   |
+| annotate types | 25.05 ms  | 309 MB   |
+| gen C/write    | 53.75 ms  | 353 MB   |
+| cc             | 746.53 ms | 353 MB   |
+| **total**      | **1,042.14 ms** | **353 MB** |
 
 ## Comparison with V1
 
