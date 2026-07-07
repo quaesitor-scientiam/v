@@ -2378,6 +2378,111 @@ fn test_mux_read_timeout_resets_on_response_progress() {
 	assert out.bodies['/slow-trickle'] == 'chunk0;chunk1;chunk2;chunk3;'
 }
 
+@[heap]
+struct DiagResults {
+mut:
+	mu          &sync.Mutex = sync.new_mutex()
+	write_times []time.Time
+	recv_times  []time.Time
+	worker_err  string
+	peer_err    string
+}
+
+fn diag_peer_loop(mut peer MuxTestPeer, mut d DiagResults) {
+	peer.read_preface() or {
+		d.mu.lock()
+		d.peer_err = 'preface: ${err.msg()}'
+		d.mu.unlock()
+		return
+	}
+	ids := peer.wait_for_headers(1) or {
+		d.mu.lock()
+		d.peer_err = 'headers: ${err.msg()}'
+		d.mu.unlock()
+		return
+	}
+	id := ids[0]
+	peer.respond_headers(id, false) or {
+		d.mu.lock()
+		d.peer_err = 'respond: ${err.msg()}'
+		d.mu.unlock()
+		return
+	}
+	for i in 0 .. 4 {
+		time.sleep(135 * time.millisecond)
+		d.mu.lock()
+		d.write_times << time.now()
+		d.mu.unlock()
+		peer.write_frame(H2DataFrame{
+			stream_id:  id
+			data:       'chunk${i};'.bytes()
+			end_stream: i == 3
+		}) or {
+			d.mu.lock()
+			d.peer_err = 'data${i}: ${err.msg()}'
+			d.mu.unlock()
+			return
+		}
+	}
+}
+
+fn diag_worker(mut conn H2MuxConn, req H2ClientRequest, mut d DiagResults) {
+	conn.do(req) or {
+		d.mu.lock()
+		d.worker_err = err.msg()
+		d.mu.unlock()
+	}
+}
+
+// DIAGNOSTIC (temporary, not a real test): measures the actual elapsed time
+// between the peer writing each DATA chunk and the client's on_data callback
+// observing it, so the real CI scheduling-delay distribution can be measured
+// directly instead of guessed at via timing constants. Always fails via
+// `assert false` so the report is guaranteed to print regardless of the test
+// runner's success/failure output verbosity. Remove once data is collected.
+fn test_diag_chunk_latency() {
+	mut cend, mut pend := new_mux_pipe()
+	mut conn := new_test_mux_conn(mut cend)
+	mut peer := &MuxTestPeer{
+		end: pend
+	}
+	mut d := &DiagResults{}
+
+	on_data := fn [mut d] (chunk []u8, body_so_far u64, body_expected u64, status int) ! {
+		d.mu.lock()
+		d.recv_times << time.now()
+		d.mu.unlock()
+	}
+
+	req := H2ClientRequest{
+		authority:    't'
+		path:         '/diag'
+		on_data:      on_data
+		read_timeout: 5 * time.second
+	}
+
+	worker := spawn diag_worker(mut conn, req, mut d)
+	peer_thread := spawn diag_peer_loop(mut peer, mut d)
+
+	worker.wait()
+	cend.close_both()
+	peer_thread.wait()
+
+	d.mu.lock()
+	mut report := 'chunk write->on_data latency report (worker_err="${d.worker_err}", peer_err="${d.peer_err}", writes=${d.write_times.len}, recvs=${d.recv_times.len}):\n'
+	for i in 0 .. d.write_times.len {
+		if i < d.recv_times.len {
+			delta := d.recv_times[i] - d.write_times[i]
+			report += '  chunk ${i}: latency = ${delta}\n'
+		} else {
+			report += '  chunk ${i}: NEVER OBSERVED by on_data\n'
+		}
+	}
+	d.mu.unlock()
+	eprintln(report)
+	assert false, 'diagnostic only -- see the printed report above'
+}
+
 // h2_response_phase_since must not report a stale last_activity while a
 // caller's on_data callback is running: read_timeout bounds how long a
 // request waits for the response over the WIRE, not how long the caller's
