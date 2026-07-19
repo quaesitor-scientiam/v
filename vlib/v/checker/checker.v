@@ -499,18 +499,19 @@ pub fn (mut c Checker) check(mut ast_file ast.File) {
 	c.reset_checker_state_at_start_of_new_file()
 	c.change_current_file(ast_file)
 	for i, ast_import in ast_file.imports {
+		import_name := ast_import.source_name
 		// Imports with the same path and name (self-imports and module name conflicts with builtin module imports)
 		if c.mod == ast_import.mod {
-			c.error('cannot import `${ast_import.mod}` into a module with the same name',
+			c.error('cannot import `${import_name}` into a module with the same name',
 				ast_import.mod_pos)
 		}
 		// Duplicates of regular imports with the default alias (modname) and `as` imports with a custom alias
 		if c.mod == ast_import.alias {
 			if c.mod == ast_import.mod.all_after_last('.') {
-				c.error('cannot import `${ast_import.mod}` into a module with the same name',
+				c.error('cannot import `${import_name}` into a module with the same name',
 					ast_import.mod_pos)
 			}
-			c.error('cannot import `${ast_import.mod}` as `${ast_import.alias}` into a module with the same name',
+			c.error('cannot import `${import_name}` as `${ast_import.alias}` into a module with the same name',
 				ast_import.alias_pos)
 		}
 		for sym in ast_import.syms {
@@ -2874,8 +2875,13 @@ fn (mut c Checker) check_or_last_stmt(mut stmt ast.Stmt, ret_type ast.Type, defa
 				}
 
 				c.expected_or_type = ast.void_type
-				type_fits := c.check_types(last_stmt_typ, ret_type)
-					&& last_stmt_typ.nr_muls() == ret_type.nr_muls()
+				// A multi-return `or {}` default may supply a plain `T` element where the
+				// expected slot is `?T`; the or-block codegen wraps it (see `concat_expr`'s
+				// `inside_or_block` path), so allow that promotion explicitly here. The
+				// strict `check_types` multi-return check above otherwise rejects it.
+				type_fits := (c.check_types(last_stmt_typ, ret_type)
+					&& last_stmt_typ.nr_muls() == ret_type.nr_muls())
+					|| c.can_use_expected_multi_return_expr_type(last_stmt_typ, ret_type, stmt.expr)
 				is_noreturn := is_noreturn_callexpr(stmt.expr)
 				if type_fits || is_noreturn {
 					return
@@ -7748,6 +7754,25 @@ fn (mut c Checker) mark_as_referenced(mut node ast.Expr, as_interface bool) {
 					return
 				}
 				type_sym := c.table.sym(obj.typ.set_nr_muls(0))
+				// Resolve aliases so that a `type Arr = [N]T` is treated like its
+				// underlying fixed array: fixed arrays live on the stack, so they
+				// cannot be referenced/heap-promoted. Without this, the alias slips
+				// past the guard below and cgen emits invalid `HEAP(Arr, ({0}))`
+				// (#27646). Use `fully_unaliased_type` (not `final_sym`, which
+				// discards `nr_muls`/flags).
+				//
+				// The only usable pointer to a fixed array is a *named* pointer
+				// alias (`type Ptr = &Arr`): V represents it as a real pointer, so
+				// `&p` is valid there. A raw top-level `&Arr` (from `&arr`, or a
+				// `fn () &Arr` return) is not a usable pointer - cgen decays it to
+				// the fixed array value - so it must be rejected like the array
+				// itself. `set_nr_muls(0)` strips the raw top-level pointer (so a
+				// raw `&Arr` is treated as `Arr` and rejected), while a pointer
+				// carried on the alias parent survives `fully_unaliased_type` and
+				// keeps `nr_muls() > 0` (so a named `Ptr` is accepted).
+				unaliased_typ := c.table.fully_unaliased_type(obj.typ.set_nr_muls(0))
+				is_fixed_array := unaliased_typ.nr_muls() == 0
+					&& c.table.sym(unaliased_typ).kind == .array_fixed
 				if obj.is_stack_obj && !type_sym.is_heap() && !type_sym.is_int()
 					&& !c.pref.translated && !c.file.is_translated {
 					suggestion := if type_sym.kind == .struct {
@@ -7758,7 +7783,7 @@ fn (mut c Checker) mark_as_referenced(mut node ast.Expr, as_interface bool) {
 					mischief := if as_interface { 'used as interface object' } else { 'referenced' }
 					c.error('`${node.name}` cannot be ${mischief} outside `unsafe` blocks as it might be stored on stack. Consider ${suggestion}.',
 						node.pos)
-				} else if type_sym.kind == .array_fixed {
+				} else if is_fixed_array {
 					c.error('cannot reference fixed array `${node.name}` outside `unsafe` blocks as it is supposed to be stored on stack',
 						node.pos)
 				} else {
@@ -7860,6 +7885,8 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 			} else if expr.expr is ast.StructInit {
 				c.error('should not create object instance on the heap to simply access a member',
 					node.pos.extend(expr.pos))
+			} else if expr.has_hidden_receiver {
+				c.error('cannot take the address of ${ast.Expr(expr)}', node.pos)
 			}
 			right_sym := c.table.sym(right_type)
 			expr_sym := c.table.sym(expr.expr_type)

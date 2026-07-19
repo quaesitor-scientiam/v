@@ -118,9 +118,15 @@ fn (mut a array) mark_buffer_has_slices() {
 	if !a.flags.has(.managed) || a.data == unsafe { nil } {
 		return
 	}
+	// Compute the data-header pointer inline. `data_header()` would redundantly
+	// re-check `.managed`/`nil` (already guaranteed above), so skip the call and
+	// the now-dead `header != nil` test. Only store when the flag is not already
+	// set, to avoid dirtying the buffer's header cache line on every transient
+	// slice of the same buffer in a hot loop. See issue #27507.
 	unsafe {
-		header := a.data_header()
-		if header != nil {
+		base_data := &u8(a.data) - u64(a.offset)
+		header := &ArrayDataHeader(base_data - array_data_header_size())
+		if !header.has_slices {
 			header.has_slices = true
 		}
 	}
@@ -487,6 +493,11 @@ fn (a array) needs_unique_append(required int) bool {
 @[inline]
 fn (a array) needs_unique_shrink() bool {
 	return a.flags.has(.is_slice) || a.buffer_has_slices()
+}
+
+@[inline]
+fn (a array) is_slice_view() bool {
+	return a.flags.has(.is_slice)
 }
 
 // insert inserts a value in the array at index `i` and increases

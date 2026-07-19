@@ -1116,6 +1116,7 @@ fn (mut g Gen) post_process_generic_fns_for_files(files []&ast.File) {
 						}
 						emitted_generic_specializations[specialization_key] = true
 						g.cur_concrete_types = concrete_specialization.clone()
+						g.clear_type_resolution_caches()
 						g.fn_decl(*generic_fn)
 						emitted_this_round = true
 					}
@@ -2028,8 +2029,13 @@ fn (mut g Gen) fn_decl_params(params []ast.Param, scope &ast.Scope, is_variadic 
 		if g.pref.translated && g.file.is_translated && param.typ.has_flag(.variadic) {
 			typ = g.table.sym(typ).array_info().elem_type.set_flag(.variadic)
 		}
+		// A `mut x T` parameter is passed by reference, so its C type must be a pointer to
+		// the concrete type. The normal solver keeps `.generic` on `param.typ` here, but the
+		// new generic solver pre-resolves `param.typ` to the concrete type (dropping the flag),
+		// so it would otherwise miss the indirection. `param.orig_typ` still carries the
+		// generic `T`, which resolves correctly via `cur_concrete_types`.
 		if param.is_mut && param.orig_typ != 0 && param.orig_typ.has_flag(.generic)
-			&& param.typ.has_flag(.generic) {
+			&& (param.typ.has_flag(.generic) || g.pref.new_generic_solver) {
 			mut surface_typ := g.unwrap_generic(param.orig_typ)
 			// Only use ref() when the pointer comes from the generic type argument
 			// (T=&int), not from the param signature (&T / ?&T).
@@ -4393,6 +4399,14 @@ fn (mut g Gen) unwrap_receiver_type(node ast.CallExpr) (ast.Type, &ast.TypeSymbo
 			resolved_left_type := g.resolve_current_fn_generic_param_type(node.left.name)
 			if resolved_left_type != 0 {
 				left_type = resolved_left_type
+			} else if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+				// node.left_type may be stale from a previous generic instantiation
+				// (the checker overwrites it on each pass); re-resolve it from the scope
+				scope_type := g.resolved_scope_var_type(node.left)
+				if scope_type != 0 && !scope_type.has_flag(.generic)
+					&& !g.type_has_unresolved_generic_parts(scope_type) {
+					left_type = scope_type
+				}
 			}
 		}
 	} else if node.left is ast.StructInit {
@@ -4754,6 +4768,25 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 	left_sym := g.table.sym(left_type)
 	final_left_sym := g.table.final_sym(left_type)
+	// In generic functions node.from_embed_types may be stale: the checker overwrites
+	// it on each instantiation pass, so the state of the last checked concrete type
+	// wins (including a possibly empty state). Re-resolve it for the current
+	// concrete receiver type.
+	mut effective_embed_types := node.from_embed_types.clone()
+	if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 && left_sym.kind != .interface
+		&& final_left_sym.info is ast.Struct {
+		if left_sym.has_method(method_name) || final_left_sym.has_method(method_name)
+			|| final_left_sym.has_method_with_generic_parent(method_name) {
+			effective_embed_types = []
+		} else {
+			_, embed_types := g.table.find_method_from_embeds(final_left_sym, method_name) or {
+				ast.Fn{}, []ast.Type{}
+			}
+			if embed_types.len > 0 {
+				effective_embed_types = embed_types.clone()
+			}
+		}
+	}
 	mut use_builtin_array_sort := false
 	if final_left_sym.kind == .array && node.kind in [.sort, .sorted] && node.args.len > 0 {
 		if method := left_sym.find_method(method_name) {
@@ -5465,7 +5498,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 	}
 
 	if free_receiver_heap_copy == '' && receiver_needs_ref && (!left_type.is_ptr()
-		|| node.from_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.kind != .str)) {
+		|| effective_embed_types.len != 0 || (left_type.has_flag(.shared_f) && node.kind != .str)) {
 		// The receiver is a reference, but the caller provided a value
 		// Add `&` automatically.
 		// TODO: same logic in call_args()
@@ -5493,11 +5526,11 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 		}
 	} else if free_receiver_heap_copy == '' && !receiver_needs_ref && left_type.is_ptr()
-		&& node.kind != .str && node.from_embed_types.len == 0 {
+		&& node.kind != .str && effective_embed_types.len == 0 {
 		if !left_type.has_flag(.shared_f) {
 			g.write('*'.repeat(left_type.nr_muls()))
 		}
-	} else if free_receiver_heap_copy == '' && !is_range_slice && node.from_embed_types.len == 0
+	} else if free_receiver_heap_copy == '' && !is_range_slice && effective_embed_types.len == 0
 		&& node.kind != .str {
 		diff := left_type.nr_muls() - receiver_type.nr_muls()
 		if diff > 0 {
@@ -5518,7 +5551,7 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			g.write('(map[]){')
 			g.expr(ast.Expr(node.left))
 			g.write('}[0]')
-		} else if !is_interface && node.from_embed_types.len > 0 {
+		} else if !is_interface && effective_embed_types.len > 0 {
 			// For mut generic params where the concrete type resolves
 			// to a multi-pointer (e.g. mut ctx X where X = &Context →
 			// C param is Context**), fn_decl_params adds .ref() which
@@ -5541,29 +5574,29 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			} else {
 				g.expr(ast.Expr(node.left))
 			}
-		} else if is_interface && node.from_embed_types.len > 0 {
+		} else if is_interface && effective_embed_types.len > 0 {
 			if g.out.last_n(1) == '&' {
 				g.go_back(1)
 			}
 			if receiver_type.is_ptr() && left_type.is_ptr() {
 				// (main__IFoo*)bar
-				g.write2('(', g.table.sym(node.from_embed_types.last()).cname)
+				g.write2('(', g.table.sym(effective_embed_types.last()).cname)
 				g.write('*)')
 				g.expr(ast.Expr(node.left))
 			} else if receiver_type.is_ptr() && !left_type.is_ptr() {
 				// (main__IFoo*)&bar
-				g.write2('(', g.table.sym(node.from_embed_types.last()).cname)
+				g.write2('(', g.table.sym(effective_embed_types.last()).cname)
 				g.write('*)&')
 				g.expr(ast.Expr(node.left))
 			} else if !receiver_type.is_ptr() && left_type.is_ptr() {
 				// *((main__IFoo*)bar)
-				g.write2('*((', g.table.sym(node.from_embed_types.last()).cname)
+				g.write2('*((', g.table.sym(effective_embed_types.last()).cname)
 				g.write('*)')
 				g.expr(ast.Expr(node.left))
 				g.write(')')
 			} else {
 				// *((main__IFoo*)&bar)
-				g.write2('*((', g.table.sym(node.from_embed_types.last()).cname)
+				g.write2('*((', g.table.sym(effective_embed_types.last()).cname)
 				g.write('*)&')
 				g.expr(node.left)
 				g.write(')')
@@ -5574,8 +5607,8 @@ fn (mut g Gen) method_call(node ast.CallExpr) {
 			}
 			g.expr(node.left)
 		}
-		if !is_interface || node.from_embed_types.len == 0 {
-			mut node_embed_types := node.from_embed_types.clone()
+		if !is_interface || effective_embed_types.len == 0 {
+			mut node_embed_types := effective_embed_types.clone()
 			if node.left is ast.Ident && g.comptime.get_ct_type_var(node.left) == .generic_var
 				&& !final_left_sym.has_method(method_name)
 				&& !final_left_sym.has_method_with_generic_parent(method_name) {
@@ -6358,9 +6391,27 @@ fn array_mut_arg_is_addressable(expr ast.Expr) bool {
 }
 
 fn (mut g Gen) call_args(node ast.CallExpr) {
+	// Call arguments are independent expressions: an option/result-typed argument
+	// wraps itself based on its own expected type, not on any enclosing if/match
+	// option context. Reset those flags so that a nested if/match expression used as
+	// a plain (non-option) argument is not wrongly option-wrapped with the enclosing
+	// function's return type (e.g. `return match { X { SV(create(if c { EnumA } else
+	// { EnumB })) } }` in an `?SV` fn would wrap the enum branch as `?SV`).
+	prev_inside_if_option := g.inside_if_option
+	prev_inside_match_option := g.inside_match_option
+	prev_inside_if_result := g.inside_if_result
+	prev_inside_match_result := g.inside_match_result
+	g.inside_if_option = false
+	g.inside_match_option = false
+	g.inside_if_result = false
+	g.inside_match_result = false
 	g.expected_fixed_arr = true
 	defer {
 		g.expected_fixed_arr = false
+		g.inside_if_option = prev_inside_if_option
+		g.inside_match_option = prev_inside_match_option
+		g.inside_if_result = prev_inside_if_result
+		g.inside_match_result = prev_inside_match_result
 	}
 	args := if g.is_js_call {
 		if node.args.len < 1 {
@@ -7457,6 +7508,9 @@ fn (mut g Gen) ref_or_deref_arg_ex(arg ast.CallArg, expected_type_ ast.Type, lan
 				g.write('(${g.styp(arg.expr.typ)})')
 			}
 		}
+	} else if arg.expr is ast.StructInit
+		&& g.table.final_sym(g.unwrap_generic(arg.expr.typ)).kind == .array_fixed {
+		g.write('(${g.styp(arg.expr.typ)})')
 	} else if arg.expr is ast.ComptimeSelector && arg_typ.has_flag(.option)
 		&& !expected_type.has_flag(.option) {
 		// allow to pass val.$(filed.name) where T is expected, doing automatic unwrap in this case

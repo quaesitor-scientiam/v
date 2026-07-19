@@ -112,8 +112,21 @@ pub mut:
 
 pub struct Result {
 pub:
-	cols map[string]int
-	rows []Row
+	cols  map[string]int
+	names []string
+	rows  []Row
+}
+
+// SslMode controls PostgreSQL SSL/TLS negotiation through libpq's `sslmode`
+// connection keyword.
+pub enum SslMode {
+	unset
+	disable
+	allow
+	prefer
+	require
+	verify_ca
+	verify_full
 }
 
 // Notification represents a notification received from the server via LISTEN/NOTIFY
@@ -132,6 +145,12 @@ pub:
 	username string
 	password string
 	dbname   string
+	// SSL/TLS configuration, passed through to libpq connection keywords.
+	ssl_mode SslMode
+	ssl_key  string // client key file path, maps to sslkey
+	ssl_cert string // client certificate file path, maps to sslcert
+	ssl_ca   string // CA certificate file path, maps to sslrootcert
+	ssl_crl  string // certificate revocation list file path, maps to sslcrl
 }
 
 //
@@ -272,6 +291,18 @@ fn escape_conninfo_value(value string) string {
 	return escaped.bytestr()
 }
 
+fn (mode SslMode) conninfo_value() string {
+	return match mode {
+		.unset { '' }
+		.disable { 'disable' }
+		.allow { 'allow' }
+		.prefer { 'prefer' }
+		.require { 'require' }
+		.verify_ca { 'verify-ca' }
+		.verify_full { 'verify-full' }
+	}
+}
+
 // connection_user returns the configured username, accepting both `user` and `username`.
 pub fn (config Config) connection_user() !string {
 	if config.user != '' && config.username != '' && config.user != config.username {
@@ -284,7 +315,7 @@ pub fn (config Config) connection_user() !string {
 }
 
 fn (config Config) conninfo() !string {
-	mut parts := []string{cap: 5}
+	mut parts := []string{cap: 10}
 	if config.host != '' {
 		parts << 'host=${escape_conninfo_value(config.host)}'
 	}
@@ -300,6 +331,21 @@ fn (config Config) conninfo() !string {
 	}
 	if config.password != '' {
 		parts << 'password=${escape_conninfo_value(config.password)}'
+	}
+	if config.ssl_mode != .unset {
+		parts << 'sslmode=${config.ssl_mode.conninfo_value()}'
+	}
+	if config.ssl_cert != '' {
+		parts << 'sslcert=${escape_conninfo_value(config.ssl_cert)}'
+	}
+	if config.ssl_key != '' {
+		parts << 'sslkey=${escape_conninfo_value(config.ssl_key)}'
+	}
+	if config.ssl_ca != '' {
+		parts << 'sslrootcert=${escape_conninfo_value(config.ssl_ca)}'
+	}
+	if config.ssl_crl != '' {
+		parts << 'sslcrl=${escape_conninfo_value(config.ssl_crl)}'
 	}
 	return parts.join(' ')
 }
@@ -443,14 +489,16 @@ fn res_to_result(res voidptr) Result {
 	nr_cols := C.PQnfields(res)
 
 	mut cols := map[string]int{}
+	mut names := []string{}
+	for j in 0 .. nr_cols {
+		field_name := unsafe { cstring_to_vstring(C.PQfname(res, j)) }
+		cols[field_name] = j
+		names << field_name
+	}
 	mut rows := []Row{}
 	for i in 0 .. nr_rows {
 		mut row := Row{}
 		for j in 0 .. nr_cols {
-			if i == 0 {
-				field_name := unsafe { cstring_to_vstring(C.PQfname(res, j)) }
-				cols[field_name] = j
-			}
 			if C.PQgetisnull(res, i, j) != 0 {
 				row.vals << none
 			} else {
@@ -462,7 +510,7 @@ fn res_to_result(res voidptr) Result {
 	}
 
 	C.PQclear(res)
-	return Result{cols, rows}
+	return Result{cols, names, rows}
 }
 
 // close releases this conn back to its pool. Safe to call more than once:

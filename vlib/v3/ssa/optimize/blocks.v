@@ -2,8 +2,8 @@ module optimize
 
 import v3.ssa
 
+// remove_unreachable_blocks updates remove unreachable blocks state for optimize.
 fn remove_unreachable_blocks(mut m ssa.Module) {
-	build_cfg(mut m)
 	for fi in 0 .. m.funcs.len {
 		if m.funcs[fi].blocks.len == 0 {
 			continue
@@ -28,6 +28,10 @@ fn remove_unreachable_blocks(mut m ssa.Module) {
 		for blk in m.funcs[fi].blocks {
 			if reachable[blk] {
 				new_blocks << blk
+			} else {
+				for value_id in m.blocks[blk].instrs {
+					m.detach_instruction_uses(value_id)
+				}
 			}
 		}
 		mut func := m.funcs[fi]
@@ -36,6 +40,7 @@ fn remove_unreachable_blocks(mut m ssa.Module) {
 	}
 }
 
+// merge_blocks supports merge blocks handling for optimize.
 fn merge_blocks(mut m ssa.Module) {
 	mut changed := true
 	mut first := true

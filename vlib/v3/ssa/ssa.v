@@ -2,10 +2,16 @@ module ssa
 
 import v3.token
 
+// ValueID aliases value id values used by ssa.
 pub type ValueID = int
+
+// TypeID aliases type id values used by ssa.
 pub type TypeID = int
+
+// BlockID aliases block id values used by ssa.
 pub type BlockID = int
 
+// OpCode lists op code values used by ssa.
 pub enum OpCode {
 	// Terminators
 	ret
@@ -80,6 +86,7 @@ pub enum OpCode {
 	struct_init
 }
 
+// AtomicOrdering lists atomic ordering values used by ssa.
 pub enum AtomicOrdering {
 	not_atomic
 	unordered
@@ -90,6 +97,7 @@ pub enum AtomicOrdering {
 	seq_cst
 }
 
+// InlineHint lists inline hint values used by ssa.
 pub enum InlineHint {
 	none_  // No hint, let optimizer decide
 	always // Always inline (e.g. V's [inline] attribute)
@@ -97,6 +105,7 @@ pub enum InlineHint {
 	hint   // Suggest inlining (optimizer may ignore)
 }
 
+// TypeKind lists type kind values used by ssa.
 pub enum TypeKind {
 	void_t
 	int_t
@@ -109,6 +118,7 @@ pub enum TypeKind {
 	metadata_t
 }
 
+// Type represents type data used by ssa.
 pub struct Type {
 pub:
 	kind        TypeKind
@@ -124,6 +134,7 @@ pub:
 	is_union    bool // True for union types (all fields overlap at offset 0)
 }
 
+// TypeStore represents type store data used by ssa.
 pub struct TypeStore {
 pub mut:
 	types []Type
@@ -132,6 +143,7 @@ pub mut:
 
 const recursive_type_slot_size = 256
 
+// new creates a TypeStore value for ssa.
 pub fn TypeStore.new() TypeStore {
 	mut ts := TypeStore{
 		cache: map[string]TypeID{}
@@ -142,6 +154,7 @@ pub fn TypeStore.new() TypeStore {
 	return ts
 }
 
+// get_int returns get int data for TypeStore.
 pub fn (mut ts TypeStore) get_int(width int) TypeID {
 	key := 'i${width}'
 	if id := ts.cache[key] {
@@ -154,6 +167,7 @@ pub fn (mut ts TypeStore) get_int(width int) TypeID {
 	return id
 }
 
+// get_uint returns get uint data for TypeStore.
 pub fn (mut ts TypeStore) get_uint(width int) TypeID {
 	key := 'u${width}'
 	if id := ts.cache[key] {
@@ -166,6 +180,7 @@ pub fn (mut ts TypeStore) get_uint(width int) TypeID {
 	return id
 }
 
+// get_float returns get float data for TypeStore.
 pub fn (mut ts TypeStore) get_float(width int) TypeID {
 	key := 'f${width}'
 	if id := ts.cache[key] {
@@ -178,6 +193,7 @@ pub fn (mut ts TypeStore) get_float(width int) TypeID {
 	return id
 }
 
+// get_ptr returns get ptr data for TypeStore.
 pub fn (mut ts TypeStore) get_ptr(elem TypeID) TypeID {
 	key := 'p${elem}'
 	if id := ts.cache[key] {
@@ -222,24 +238,28 @@ pub fn (mut ts TypeStore) get_tuple(elem_types []TypeID) TypeID {
 	return id
 }
 
+// register supports register handling for TypeStore.
 pub fn (mut ts TypeStore) register(t Type) TypeID {
 	id := TypeID(ts.types.len)
 	ts.types << t
 	return id
 }
 
+// ValueKind lists value kind values used by ssa.
 pub enum ValueKind {
 	unknown
 	constant
 	argument
 	global
 	instruction
+	phi_result
 	basic_block
 	string_literal   // V string struct literal (by value)
 	c_string_literal // C string literal (raw char pointer)
 	func_ref
 }
 
+// Value represents value data used by ssa.
 pub struct Value {
 pub mut:
 	id    ValueID
@@ -260,6 +280,7 @@ pub:
 	str_val   string
 }
 
+// Instruction represents instruction data used by ssa.
 pub struct Instruction {
 pub mut:
 	op         OpCode
@@ -271,6 +292,56 @@ pub mut:
 	inline     InlineHint // Inline hint for call instructions
 }
 
+// is_block_operand reports whether operand `idx` names a basic block rather
+// than an SSA value. Keep all mixed-layout instruction knowledge here so CFG,
+// optimizer, verifier, and worker code cannot disagree about operand roles.
+pub fn (i &Instruction) is_block_operand(idx int) bool {
+	if idx < 0 || idx >= i.operands.len {
+		return false
+	}
+	return match i.op {
+		.jmp { idx == 0 }
+		.br { idx == 1 || idx == 2 }
+		// switch_: cond, default_blk, [case_val, blk]...
+		.switch_ { idx % 2 == 1 }
+		// phi: [val, predecessor_blk]...
+		.phi { idx % 2 == 1 }
+		else { false }
+	}
+}
+
+// is_value_operand reports whether operand `idx` names an SSA value.
+pub fn (i &Instruction) is_value_operand(idx int) bool {
+	return idx >= 0 && idx < i.operands.len && !i.is_block_operand(idx)
+		&& !i.is_definition_operand(idx)
+}
+
+// is_definition_operand reports whether operand `idx` is defined by an
+// instruction rather than read by it. Phi lowering represents copies as
+// `assign destination, source`, so the destination must never participate in
+// use lists or replacement walks.
+pub fn (i &Instruction) is_definition_operand(idx int) bool {
+	if idx < 0 || idx >= i.operands.len {
+		return false
+	}
+	return i.op == .assign && idx == 0
+}
+
+// is_successor_operand reports whether operand `idx` is a CFG successor. Phi
+// block operands are predecessors, so they intentionally do not match here.
+pub fn (i &Instruction) is_successor_operand(idx int) bool {
+	if idx < 0 || idx >= i.operands.len {
+		return false
+	}
+	return match i.op {
+		.jmp { idx == 0 }
+		.br { idx == 1 || idx == 2 }
+		.switch_ { idx % 2 == 1 }
+		else { false }
+	}
+}
+
+// BasicBlock represents basic block data used by ssa.
 pub struct BasicBlock {
 pub mut:
 	id     BlockID
@@ -285,18 +356,21 @@ pub mut:
 	dom_tree []BlockID
 }
 
+// CallConv lists call conv values used by ssa.
 pub enum CallConv {
 	c_decl
 	fast_call
 	wasm_std
 }
 
+// Linkage lists linkage values used by ssa.
 pub enum Linkage {
 	external
 	private
 	internal
 }
 
+// Function represents function data used by ssa.
 pub struct Function {
 pub mut:
 	id           int
@@ -310,6 +384,7 @@ pub mut:
 	call_conv    CallConv
 }
 
+// GlobalVar represents global var data used by ssa.
 pub struct GlobalVar {
 pub mut:
 	name          string
@@ -321,12 +396,14 @@ pub mut:
 	initial_data  []u8 // For constant arrays: serialized element data
 }
 
+// TargetData represents target data data used by ssa.
 pub struct TargetData {
 pub:
 	ptr_size      int  = 8
 	endian_little bool = true
 }
 
+// Module represents module data used by ssa.
 @[heap]
 pub struct Module {
 pub mut:
@@ -347,6 +424,7 @@ pub mut:
 	const_cache map[string]ValueID
 }
 
+// new creates a Module value for ssa.
 pub fn Module.new() &Module {
 	mut m := &Module{
 		type_store:        TypeStore.new()
@@ -361,6 +439,7 @@ pub fn Module.new() &Module {
 	return m
 }
 
+// add_value updates add value state for Module.
 pub fn (mut m Module) add_value(kind ValueKind, typ TypeID, name string, index int) ValueID {
 	id := ValueID(m.values.len)
 	m.values << Value{
@@ -373,6 +452,7 @@ pub fn (mut m Module) add_value(kind ValueKind, typ TypeID, name string, index i
 	return id
 }
 
+// add_instr updates add instr state for Module.
 pub fn (mut m Module) add_instr(op OpCode, block BlockID, typ TypeID, operands []ValueID) ValueID {
 	instr_idx := m.instrs.len
 	m.instrs << Instruction{
@@ -385,7 +465,10 @@ pub fn (mut m Module) add_instr(op OpCode, block BlockID, typ TypeID, operands [
 	mut blk := m.blocks[block]
 	blk.instrs << val_id
 	m.blocks[block] = blk
-	for op_id in m.instrs[instr_idx].value_operands() {
+	for oi, op_id in m.instrs[instr_idx].operands {
+		if !m.instrs[instr_idx].is_value_operand(oi) {
+			continue
+		}
 		if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
 			mut op_val := m.values[op_id]
 			op_val.uses << val_id
@@ -409,7 +492,10 @@ pub fn (mut m Module) add_instr_front(op OpCode, block BlockID, typ TypeID, oper
 	mut blk := m.blocks[block]
 	blk.instrs.prepend(val_id)
 	m.blocks[block] = blk
-	for op_id in m.instrs[instr_idx].value_operands() {
+	for oi, op_id in m.instrs[instr_idx].operands {
+		if !m.instrs[instr_idx].is_value_operand(oi) {
+			continue
+		}
 		if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
 			mut op_val := m.values[op_id]
 			op_val.uses << val_id
@@ -420,16 +506,98 @@ pub fn (mut m Module) add_instr_front(op OpCode, block BlockID, typ TypeID, oper
 }
 
 // append_phi_operands appends a (val, block_id) pair to a phi instruction.
-pub fn (mut m Module) append_phi_operands(instr_idx int, val ValueID, block_id BlockID) {
+pub fn (mut m Module) append_phi_operands(phi_val_id ValueID, val ValueID, block_id BlockID) {
+	if phi_val_id <= 0 || phi_val_id >= m.values.len || m.values[phi_val_id].kind != .instruction {
+		return
+	}
+	instr_idx := m.values[phi_val_id].index
 	mut instr := m.instrs[instr_idx]
 	instr.operands << val
 	instr.operands << block_id
 	m.instrs[instr_idx] = instr
 	if val > 0 && val < m.values.len {
-		// keep use lists consistent: the phi value uses `val`
+		if phi_val_id !in m.values[val].uses {
+			mut op_val := m.values[val]
+			op_val.uses << phi_val_id
+			m.values[val] = op_val
+		}
 	}
 }
 
+// remove_value_user removes one instruction from a value's unique user list.
+pub fn (mut m Module) remove_value_user(value_id ValueID, user_id ValueID) {
+	if value_id <= 0 || value_id >= m.values.len {
+		return
+	}
+	mut value := m.values[value_id]
+	for idx := value.uses.len - 1; idx >= 0; idx-- {
+		if value.uses[idx] == user_id {
+			value.uses.delete(idx)
+		}
+	}
+	m.values[value_id] = value
+}
+
+// add_value_user records one instruction in a value's unique user list.
+pub fn (mut m Module) add_value_user(value_id ValueID, user_id ValueID) {
+	if value_id <= 0 || value_id >= m.values.len || user_id <= 0 || user_id >= m.values.len {
+		return
+	}
+	if user_id in m.values[value_id].uses {
+		return
+	}
+	mut value := m.values[value_id]
+	value.uses << user_id
+	m.values[value_id] = value
+}
+
+// rewrite_instruction changes an instruction while maintaining its value-use
+// edges. CFG edges remain the responsibility of callers that change a
+// terminator; they can rebuild or update the CFG once after batching edits.
+pub fn (mut m Module) rewrite_instruction(value_id ValueID, op OpCode, operands []ValueID) {
+	if value_id <= 0 || value_id >= m.values.len || m.values[value_id].kind != .instruction {
+		return
+	}
+	instr_idx := m.values[value_id].index
+	if instr_idx < 0 || instr_idx >= m.instrs.len {
+		return
+	}
+	old := m.instrs[instr_idx]
+	for operand_idx, operand in old.operands {
+		if old.is_value_operand(operand_idx) {
+			m.remove_value_user(operand, value_id)
+		}
+	}
+	mut rewritten := old
+	rewritten.op = op
+	rewritten.operands = operands
+	m.instrs[instr_idx] = rewritten
+	for operand_idx, operand in operands {
+		if rewritten.is_value_operand(operand_idx) {
+			m.add_value_user(operand, value_id)
+		}
+	}
+}
+
+// detach_instruction_uses removes every use edge contributed by an
+// instruction that is about to leave its block.
+pub fn (mut m Module) detach_instruction_uses(value_id ValueID) {
+	if value_id <= 0 || value_id >= m.values.len || m.values[value_id].kind != .instruction {
+		return
+	}
+	instr_idx := m.values[value_id].index
+	if instr_idx < 0 || instr_idx >= m.instrs.len {
+		return
+	}
+	instr := m.instrs[instr_idx]
+	for operand_idx, operand in instr.operands {
+		if instr.is_value_operand(operand_idx) {
+			m.remove_value_user(operand, value_id)
+		}
+	}
+}
+
+// add_block updates add block state for Module.
 pub fn (mut m Module) add_block(func_id int, name string) BlockID {
 	id := BlockID(m.blocks.len)
 	unique := '${name}_${id}'
@@ -445,6 +613,7 @@ pub fn (mut m Module) add_block(func_id int, name string) BlockID {
 	return id
 }
 
+// new_function supports new function handling for Module.
 pub fn (mut m Module) new_function(name string, ret TypeID) int {
 	for i, f in m.funcs {
 		if f.name == name {
@@ -462,36 +631,42 @@ pub fn (mut m Module) new_function(name string, ret TypeID) int {
 
 // --- Safe mutation helpers (avoid chained struct-array mutations) ---
 
+// func_add_param supports func add param handling for Module.
 pub fn (mut m Module) func_add_param(func_id int, param_val ValueID) {
 	mut f := m.funcs[func_id]
 	f.params << param_val
 	m.funcs[func_id] = f
 }
 
+// func_set_c_extern supports func set c extern handling for Module.
 pub fn (mut m Module) func_set_c_extern(func_id int, val bool) {
 	mut f := m.funcs[func_id]
 	f.is_c_extern = val
 	m.funcs[func_id] = f
 }
 
+// func_set_prototype supports func set prototype handling for Module.
 pub fn (mut m Module) func_set_prototype(func_id int, val bool) {
 	mut f := m.funcs[func_id]
 	f.is_prototype = val
 	m.funcs[func_id] = f
 }
 
+// block_add_succ supports block add succ handling for Module.
 pub fn (mut m Module) block_add_succ(from BlockID, to BlockID) {
 	mut blk := m.blocks[from]
 	blk.succs << to
 	m.blocks[from] = blk
 }
 
+// block_add_pred supports block add pred handling for Module.
 pub fn (mut m Module) block_add_pred(to BlockID, from BlockID) {
 	mut blk := m.blocks[to]
 	blk.preds << from
 	m.blocks[to] = blk
 }
 
+// add_global updates add global state for Module.
 pub fn (mut m Module) add_global(name string, typ TypeID) ValueID {
 	id := m.globals.len
 	m.globals << GlobalVar{
@@ -536,6 +711,7 @@ pub fn (mut m Module) add_external_global(name string, typ TypeID) ValueID {
 	return m.add_value(.global, ptr_typ, name, id)
 }
 
+// get_or_add_const returns get or add const data for Module.
 pub fn (mut m Module) get_or_add_const(typ TypeID, name string) ValueID {
 	key := '${typ}:${name}'
 	if existing := m.const_cache[key] {
@@ -560,6 +736,7 @@ pub fn (m &Module) type_size(typ_id TypeID) int {
 	return m.type_size_inner(typ_id, 0, mut visiting, mut cache)
 }
 
+// type_size_inner returns type size inner data for Module.
 fn (m &Module) type_size_inner(typ_id TypeID, depth int, mut visiting []bool, mut cache []int) int {
 	if typ_id <= 0 || typ_id >= m.type_store.types.len {
 		return 0
@@ -664,10 +841,12 @@ pub fn (m &Module) type_align(typ_id TypeID) int {
 	return m.type_align_for_layout(typ_id)
 }
 
+// type_align_for_layout returns type align for layout data for Module.
 fn (m &Module) type_align_for_layout(typ_id TypeID) int {
 	return m.type_align_for_layout_inner(typ_id, 0)
 }
 
+// type_align_for_layout_inner returns type align for layout inner data for Module.
 fn (m &Module) type_align_for_layout_inner(typ_id TypeID, depth int) int {
 	if typ_id <= 0 || typ_id >= m.type_store.types.len {
 		return 1
@@ -701,11 +880,14 @@ fn (m &Module) type_align_for_layout_inner(typ_id TypeID, depth int) int {
 	return 1
 }
 
+// replace_uses supports replace uses handling for Module.
 pub fn (mut m Module) replace_uses(old_id ValueID, new_id ValueID) {
-	if old_id <= 0 || old_id >= m.values.len {
+	if old_id == new_id || old_id <= 0 || old_id >= m.values.len || new_id <= 0
+		|| new_id >= m.values.len {
 		return
 	}
-	for user_id in m.values[old_id].uses {
+	users := m.values[old_id].uses.clone()
+	for user_id in users {
 		if user_id <= 0 || user_id >= m.values.len {
 			continue
 		}
@@ -714,47 +896,25 @@ pub fn (mut m Module) replace_uses(old_id ValueID, new_id ValueID) {
 			continue
 		}
 		mut instr := m.instrs[val.index]
+		mut changed := false
 		for i in 0 .. instr.operands.len {
-			if instr.operands[i] == old_id {
+			if instr.is_value_operand(i) && instr.operands[i] == old_id {
 				instr.operands[i] = new_id
+				changed = true
 			}
 		}
-		m.instrs[val.index] = instr
-	}
-}
-
-pub fn (i &Instruction) value_operands() []ValueID {
-	if i.op == .br {
-		if i.operands.len > 0 {
-			mut r := []ValueID{}
-			r << i.operands[0]
-			return r
+		if changed {
+			m.instrs[val.index] = instr
+			if user_id !in m.values[new_id].uses {
+				mut new_val := m.values[new_id]
+				new_val.uses << user_id
+				m.values[new_id] = new_val
+			}
 		}
-		return []ValueID{}
 	}
-	if i.op == .jmp {
-		return []ValueID{}
-	}
-	if i.op == .switch_ {
-		// switch_ %val, default_block, [case_val, block]...
-		// Only %val and the case values are SSA values; blocks are raw block ids.
-		mut r := []ValueID{}
-		if i.operands.len > 0 {
-			r << i.operands[0]
-		}
-		for oi := 2; oi < i.operands.len; oi += 2 {
-			r << i.operands[oi]
-		}
-		return r
-	}
-	if i.op == .phi {
-		mut r := []ValueID{}
-		for oi := 0; oi < i.operands.len; oi += 2 {
-			r << i.operands[oi]
-		}
-		return r
-	}
-	return i.operands
+	mut old_val := m.values[old_id]
+	old_val.uses = []
+	m.values[old_id] = old_val
 }
 
 // struct_field_offset returns the byte offset of a field in a struct type.

@@ -14,6 +14,7 @@ pub:
 	val_id    int = -1
 }
 
+// str returns the string form for VerifyError.
 pub fn (e VerifyError) str() string {
 	mut s := 'SSA verify error'
 	if e.func_id >= 0 {
@@ -31,6 +32,7 @@ pub fn (e VerifyError) str() string {
 	return '${s}: ${e.msg}'
 }
 
+// VerifyPanicOptions controls verify panic options behavior used by optimize.
 pub struct VerifyPanicOptions {
 pub:
 	allow_noncritical bool
@@ -86,6 +88,7 @@ pub fn verify_and_panic_with_options(m &ssa.Module, pass_name string, opts Verif
 	}
 }
 
+// is_accepted_declaration_verify_error supports is_accepted_declaration_verify_error handling.
 fn is_accepted_declaration_verify_error(m &ssa.Module, err VerifyError) bool {
 	if err.msg == 'function has no blocks' {
 		if err.func_id < 0 || err.func_id >= m.funcs.len {
@@ -97,6 +100,7 @@ fn is_accepted_declaration_verify_error(m &ssa.Module, err VerifyError) bool {
 	return false
 }
 
+// is_legacy_noncritical_verify_error reports is_legacy_noncritical_verify_error logic in optimize.
 fn is_legacy_noncritical_verify_error(err VerifyError) bool {
 	// Dominance / use-def / phi mismatches are commonly transient between passes.
 	if err.msg.contains('does not dominate') || err.msg.contains('uses list')
@@ -119,6 +123,7 @@ fn is_legacy_noncritical_verify_error(err VerifyError) bool {
 		|| err.msg.contains('result type should be pointer')
 }
 
+// verify_function validates verify function state for optimize.
 fn verify_function(m &ssa.Module, func ssa.Function) []VerifyError {
 	mut errors := []VerifyError{}
 	if func.blocks.len == 0 {
@@ -142,6 +147,7 @@ fn verify_function(m &ssa.Module, func ssa.Function) []VerifyError {
 	return errors
 }
 
+// verify_block validates verify block state for optimize.
 fn verify_block(m &ssa.Module, func ssa.Function, blk_id int) []VerifyError {
 	mut errors := []VerifyError{}
 	blk := m.blocks[blk_id]
@@ -241,11 +247,15 @@ fn verify_block(m &ssa.Module, func ssa.Function, blk_id int) []VerifyError {
 	return errors
 }
 
+// verify_instruction validates verify instruction state for optimize.
 fn verify_instruction(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	// Only value operands are validated as value ids; block ids (branch/phi/switch
 	// targets) are validated by the op-specific checks below.
-	for i, op_id in instr.value_operands() {
+	for i, op_id in instr.operands {
+		if !instr.is_value_operand(i) {
+			continue
+		}
 		if op_id < 0 || op_id >= m.values.len {
 			errors << VerifyError{
 				msg:      'operand ${i} has invalid value id ${op_id}'
@@ -290,6 +300,26 @@ fn verify_instruction(m &ssa.Module, func_id int, blk_id int, val_id int, instr 
 		.phi {
 			errors << verify_phi(m, func_id, blk_id, val_id, instr)
 		}
+		.assign {
+			if instr.operands.len != 2 {
+				errors << VerifyError{
+					msg:      'assign has ${instr.operands.len} operands, expected 2'
+					func_id:  func_id
+					block_id: blk_id
+					val_id:   val_id
+				}
+			} else {
+				dest := instr.operands[0]
+				if dest <= 0 || dest >= m.values.len || m.values[dest].kind != .phi_result {
+					errors << VerifyError{
+						msg:      'assign has invalid destination ${dest}'
+						func_id:  func_id
+						block_id: blk_id
+						val_id:   val_id
+					}
+				}
+			}
+		}
 		.br {
 			errors << verify_branch(m, func_id, blk_id, val_id, instr)
 		}
@@ -329,22 +359,13 @@ fn verify_instruction(m &ssa.Module, func_id int, blk_id int, val_id int, instr 
 				}
 			}
 		}
-		.assign {
-			if instr.operands.len != 2 {
-				errors << VerifyError{
-					msg:      'assign has ${instr.operands.len} operands, expected 2'
-					func_id:  func_id
-					block_id: blk_id
-					val_id:   val_id
-				}
-			}
-		}
 		else {}
 	}
 
 	return errors
 }
 
+// verify_binary_op validates verify binary op state for optimize.
 fn verify_binary_op(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len != 2 {
@@ -403,6 +424,7 @@ fn verify_binary_op(m &ssa.Module, func_id int, blk_id int, val_id int, instr ss
 	return errors
 }
 
+// verify_load validates verify load state for optimize.
 fn verify_load(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len != 1 {
@@ -431,6 +453,7 @@ fn verify_load(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Ins
 	return errors
 }
 
+// verify_store validates verify store state for optimize.
 fn verify_store(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len != 2 {
@@ -459,6 +482,7 @@ fn verify_store(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.In
 	return errors
 }
 
+// verify_phi validates verify phi state for optimize.
 fn verify_phi(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len % 2 != 0 {
@@ -521,6 +545,7 @@ fn verify_phi(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Inst
 	return errors
 }
 
+// verify_branch validates verify branch state for optimize.
 fn verify_branch(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len != 3 {
@@ -546,6 +571,7 @@ fn verify_branch(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.I
 	return errors
 }
 
+// verify_jump validates verify jump state for optimize.
 fn verify_jump(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len != 1 {
@@ -569,6 +595,7 @@ fn verify_jump(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Ins
 	return errors
 }
 
+// verify_switch validates verify switch state for optimize.
 fn verify_switch(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.Instruction) []VerifyError {
 	mut errors := []VerifyError{}
 	if instr.operands.len < 2 {
@@ -612,6 +639,7 @@ fn verify_switch(m &ssa.Module, func_id int, blk_id int, val_id int, instr ssa.I
 	return errors
 }
 
+// verify_cfg_consistency validates verify cfg consistency state for optimize.
 fn verify_cfg_consistency(m &ssa.Module, func_id int, blk_id int) []VerifyError {
 	mut errors := []VerifyError{}
 	blk := m.blocks[blk_id]
@@ -655,6 +683,7 @@ fn verify_cfg_consistency(m &ssa.Module, func_id int, blk_id int) []VerifyError 
 	return errors
 }
 
+// verify_dominance validates verify dominance state for optimize.
 fn verify_dominance(m &ssa.Module, func ssa.Function) []VerifyError {
 	mut errors := []VerifyError{}
 	mut def_block := map[int]int{}
@@ -694,7 +723,10 @@ fn verify_dominance(m &ssa.Module, func ssa.Function) []VerifyError {
 			if instr.op == .phi {
 				continue
 			}
-			for i, op_id in instr.value_operands() {
+			for i, op_id in instr.operands {
+				if !instr.is_value_operand(i) {
+					continue
+				}
 				if op_id >= m.values.len {
 					continue
 				}
@@ -720,6 +752,7 @@ fn verify_dominance(m &ssa.Module, func ssa.Function) []VerifyError {
 	return errors
 }
 
+// dominates supports dominates handling for optimize.
 fn dominates(m &ssa.Module, _func ssa.Function, a int, b int) bool {
 	if a == b {
 		return true
@@ -744,6 +777,7 @@ fn dominates(m &ssa.Module, _func ssa.Function, a int, b int) bool {
 	return false
 }
 
+// verify_use_def_chains validates verify use def chains state for optimize.
 fn verify_use_def_chains(m &ssa.Module) []VerifyError {
 	mut errors := []VerifyError{}
 	mut expected_uses := map[int]map[int]bool{}
@@ -760,7 +794,10 @@ fn verify_use_def_chains(m &ssa.Module) []VerifyError {
 					continue
 				}
 				instr := m.instrs[m.values[val_id].index]
-				for op_id in instr.value_operands() {
+				for oi, op_id in instr.operands {
+					if !instr.is_value_operand(oi) {
+						continue
+					}
 					if op_id >= 0 && op_id < m.values.len {
 						if op_id !in expected_uses {
 							expected_uses[op_id] = map[int]bool{}

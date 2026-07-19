@@ -5,6 +5,7 @@ on:
     branches:
       - master
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/cross_ci.yml'
@@ -12,6 +13,7 @@ on:
       - '!cmd/tools/builders/**.v'
   pull_request:
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/cross_ci.yml'
@@ -33,7 +35,7 @@ jobs:
         with:
           fetch-depth: 10
       - name: Cache Homebrew downloads
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/Homebrew
           key: brew-cross-macos-${{ hashFiles('.github/workflows/cross_ci.yml') }}

@@ -184,6 +184,23 @@ fn (mut p Preferences) prefer_openssl_for_bsd_tinyc() {
 	}
 }
 
+fn (p &Preferences) needs_source_boehm_without_thread_local_alloc() bool {
+	return p.gc_mode in [.boehm_full, .boehm_incr, .boehm_full_opt, .boehm_incr_opt, .boehm_leak]
+		&& 'no_gc_thread_local_alloc' in p.compile_defines_all
+		&& 'dynamic_boehm' !in p.compile_defines_all
+}
+
+fn (mut p Preferences) prefer_source_boehm_without_thread_local_alloc() {
+	if !p.needs_source_boehm_without_thread_local_alloc()
+		|| 'use_bundled_libgc' in p.compile_defines_all {
+		return
+	}
+	// The prebuilt bundled libgc archives are built with thread-local allocation.
+	// Use the bundled source path instead, so builtin_d_gcboehm.c.v can omit
+	// -DTHREAD_LOCAL_ALLOC while still keeping GC_THREADS enabled.
+	p.parse_define('use_bundled_libgc')
+}
+
 // fill_with_defaults initializes unset preferences and derives build options from them.
 pub fn (mut p Preferences) fill_with_defaults() {
 	p.setup_os_and_arch_when_not_explicitly_set()
@@ -221,14 +238,6 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	npath := rpath.replace('\\', '/')
 	p.building_v = !p.is_repl && is_v_compiler_target(npath)
-	if !p.is_repl && !p.gc_set_by_flag && is_v2_compiler_target(npath) {
-		// v2 defaults to `-gc none`: the v2 compiler manages its own
-		// arenas/move semantics and the boehm collector slows it down
-		// and inflates peak memory (multi-GB for non-trivial builds).
-		// An explicit `-gc <mode>` from the user wins.
-		p.gc_mode = .no_gc
-		p.clear_gc_options()
-	}
 	if p.os == .linux {
 		$if !linux {
 			p.parse_define('cross_compile')
@@ -273,6 +282,7 @@ pub fn (mut p Preferences) fill_with_defaults() {
 	}
 	p.ccompiler_type = cc_from_string(p.ccompiler)
 	p.normalize_gc_defaults_for_resolved_ccompiler()
+	p.prefer_source_boehm_without_thread_local_alloc()
 	p.is_test = p.path.ends_with('_test.v') || p.path.ends_with('_test.vv')
 		|| p.path.all_before_last('.v').all_before_last('.').ends_with('_test')
 	p.is_vsh = p.path.ends_with('.vsh') || p.raw_vsh_tmp_prefix != ''
@@ -333,17 +343,8 @@ pub fn (mut p Preferences) fill_with_defaults() {
 
 fn is_v_compiler_target(npath string) bool {
 	target := npath.trim_right('/')
-	return target.ends_with('cmd/v') || target.ends_with('cmd/v/v.v') || target.ends_with('cmd/v2')
-		|| target.ends_with('cmd/v2/v2.v') || target.ends_with('cmd/tools/vfmt.v')
-}
-
-// is_v2_compiler_target reports whether the given resolved input path is
-// building the v2 compiler itself (the `cmd/v2` directory or its `v2.v`
-// entry point). Used to force `-gc none` for v2 since the v2 compiler
-// manages its own arenas and breaks under boehm.
-fn is_v2_compiler_target(npath string) bool {
-	target := npath.trim_right('/')
-	return target.ends_with('cmd/v2') || target.ends_with('cmd/v2/v2.v')
+	return target.ends_with('cmd/v') || target.ends_with('cmd/v/v.v')
+		|| target.ends_with('cmd/tools/vfmt.v')
 }
 
 // normalize_gc_defaults_for_resolved_ccompiler applies compiler-dependent
@@ -439,7 +440,7 @@ fn (mut p Preferences) find_cc_if_cross_compiling() {
 
 fn (mut p Preferences) try_to_use_tcc_by_default() {
 	preferred_tcc := default_tcc_compiler()
-	if p.ccompiler == 'tcc' {
+	if p.ccompiler in ['tcc', 'tinyc'] {
 		p.ccompiler = if preferred_tcc != '' { preferred_tcc } else { 'tcc' }
 		return
 	}
@@ -449,8 +450,20 @@ fn (mut p Preferences) try_to_use_tcc_by_default() {
 		if p.prealloc {
 			return
 		}
+		// -d no_gc_thread_local_alloc forces the bundled source libgc path. The
+		// bundled tcc cannot compile that source reliably, so use the platform C
+		// compiler by default. An explicit -cc still wins.
+		if p.needs_source_boehm_without_thread_local_alloc() {
+			return
+		}
 		// use an optimizing compiler (i.e. gcc or clang) on -prod mode
 		if p.is_prod {
+			return
+		}
+		// The macOS bundled tcc is sensitive to Apple SDK/header changes and
+		// app/framework includes. Keep it available through explicit `-cc tcc`,
+		// but default to the platform compiler on macOS.
+		if get_host_os() == .macos {
 			return
 		}
 		p.ccompiler = preferred_tcc
@@ -546,10 +559,10 @@ fn (mut p Preferences) clear_gc_options() {
 pub fn (mut p Preferences) default_c_compiler() {
 	// TODO: fix $if after 'string'
 	$if windows {
-		// -prealloc and -prod intentionally avoid the bundled tcc (see
+		// These modes intentionally avoid bundled tcc (see
 		// try_to_use_tcc_by_default); preserve that here so the Windows fallback
 		// does not silently re-select an incompatible compiler.
-		if p.prealloc || p.is_prod {
+		if p.prealloc || p.is_prod || p.needs_source_boehm_without_thread_local_alloc() {
 			p.ccompiler = 'gcc'
 			return
 		}

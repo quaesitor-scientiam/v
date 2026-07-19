@@ -2,6 +2,7 @@ module arm64
 
 import v3.ssa
 
+// Gen stores state for ARM64 code generation.
 pub struct Gen {
 mut:
 	m                    &ssa.Module  = unsafe { nil }
@@ -18,11 +19,13 @@ mut:
 	cur_func_sret_offset int
 }
 
+// PendingJmp represents pending jmp data used by arm64.
 struct PendingJmp {
 	text_pos int
 	block_id int
 }
 
+// new creates a Gen value for arm64.
 pub fn Gen.new(m &ssa.Module) &Gen {
 	return &Gen{
 		m:              m
@@ -37,6 +40,7 @@ pub fn Gen.new(m &ssa.Module) &Gen {
 	}
 }
 
+// gen supports gen handling for Gen.
 pub fn (mut g Gen) gen() {
 	g.gen_pre_pass()
 	for fi in 0 .. g.m.funcs.len {
@@ -45,24 +49,47 @@ pub fn (mut g Gen) gen() {
 	g.gen_post_pass()
 }
 
+// write_and_link writes and link output for arm64.
 pub fn (mut g Gen) write_and_link(output string) {
 	mut l := Linker.new(g.macho)
 	l.link(output, '_main')
 }
 
+// reset_value_slots updates reset value slots state for arm64.
 fn (mut g Gen) reset_value_slots() {
 	n := g.m.values.len
-	g.stack_offsets = []int{len: n}
-	g.alloca_offsets = []int{len: n}
-	g.alloca_sizes = []int{len: n}
+	if g.stack_offsets.len != n {
+		g.stack_offsets = []int{len: n}
+		g.alloca_offsets = []int{len: n}
+		g.alloca_sizes = []int{len: n}
+		return
+	}
+	for i in 0 .. n {
+		g.stack_offsets[i] = 0
+		g.alloca_offsets[i] = 0
+		g.alloca_sizes[i] = 0
+	}
 }
 
+fn (mut g Gen) reset_block_offsets() {
+	n := g.m.blocks.len
+	if g.block_offsets.len != n {
+		g.block_offsets = []int{len: n, init: -1}
+		return
+	}
+	for i in 0 .. n {
+		g.block_offsets[i] = -1
+	}
+}
+
+// set_stack_slot updates set stack slot state for arm64.
 fn (mut g Gen) set_stack_slot(val_id int, off int) {
 	if val_id > 0 && val_id < g.stack_offsets.len {
 		g.stack_offsets[val_id] = off
 	}
 }
 
+// stack_slot supports stack slot handling for Gen.
 fn (g &Gen) stack_slot(val_id int) ?int {
 	if val_id > 0 && val_id < g.stack_offsets.len {
 		off := g.stack_offsets[val_id]
@@ -73,6 +100,7 @@ fn (g &Gen) stack_slot(val_id int) ?int {
 	return none
 }
 
+// set_alloca_slot updates set alloca slot state for arm64.
 fn (mut g Gen) set_alloca_slot(val_id int, off int, size int) {
 	if val_id > 0 && val_id < g.alloca_offsets.len {
 		g.alloca_offsets[val_id] = off
@@ -80,6 +108,7 @@ fn (mut g Gen) set_alloca_slot(val_id int, off int, size int) {
 	}
 }
 
+// alloca_slot supports alloca slot handling for Gen.
 fn (g &Gen) alloca_slot(val_id int) ?int {
 	if val_id > 0 && val_id < g.alloca_offsets.len {
 		off := g.alloca_offsets[val_id]
@@ -90,6 +119,7 @@ fn (g &Gen) alloca_slot(val_id int) ?int {
 	return none
 }
 
+// alloca_byte_size supports alloca byte size handling for Gen.
 fn (g &Gen) alloca_byte_size(val_id int) ?int {
 	if val_id > 0 && val_id < g.alloca_sizes.len {
 		size := g.alloca_sizes[val_id]
@@ -100,6 +130,7 @@ fn (g &Gen) alloca_byte_size(val_id int) ?int {
 	return none
 }
 
+// gen_pre_pass emits pre pass output for arm64.
 fn (mut g Gen) gen_pre_pass() {
 	mut data_offset := u64(0)
 	for gi in 0 .. g.m.globals.len {
@@ -110,6 +141,7 @@ fn (mut g Gen) gen_pre_pass() {
 	}
 }
 
+// gen_post_pass emits post pass output for arm64.
 fn (mut g Gen) gen_post_pass() {
 	for gi in 0 .. g.m.globals.len {
 		for g.macho.data_data.len % 8 != 0 {
@@ -133,6 +165,7 @@ fn (mut g Gen) gen_post_pass() {
 	}
 }
 
+// gen_func emits func output for arm64.
 fn (mut g Gen) gen_func(func_idx int) {
 	func := g.m.funcs[func_idx]
 	if func.is_c_extern {
@@ -150,8 +183,7 @@ fn (mut g Gen) gen_func(func_idx int) {
 	g.reset_value_slots()
 	g.pending_jmps.clear()
 
-	n_blks := g.m.blocks.len
-	g.block_offsets = []int{len: n_blks, init: -1}
+	g.reset_block_offsets()
 
 	// Frame layout (all at negative offsets from fp):
 	// fp + 0: saved fp
@@ -182,6 +214,12 @@ fn (mut g Gen) gen_func(func_idx int) {
 				continue
 			}
 			instr := g.m.instrs[val.index]
+			if instr.op == .assign {
+				if instr.operands.len > 0 {
+					slot_offset = g.reserve_value_stack_slot(instr.operands[0], slot_offset)
+				}
+				continue
+			}
 			if instr.op == .alloca {
 				ptr_type := g.m.type_store.types[val.typ]
 				elem_size := g.m.type_size(ptr_type.elem_type)
@@ -206,16 +244,7 @@ fn (mut g Gen) gen_func(func_idx int) {
 				slot_offset += 8
 			} else if instr.op != .store && instr.op != .ret && instr.op != .br && instr.op != .jmp
 				&& instr.op != .unreachable {
-				result_size := g.m.type_size(val.typ)
-				alloc_size := if result_size > 8 && val.typ > 0
-					&& val.typ < g.m.type_store.types.len
-					&& g.m.type_store.types[val.typ].kind == .struct_t {
-					(result_size + 7) & ~7
-				} else {
-					8
-				}
-				slot_offset += alloc_size
-				g.set_stack_slot(val_id, -slot_offset)
+				slot_offset = g.reserve_value_stack_slot(val_id, slot_offset)
 			}
 		}
 	}
@@ -305,6 +334,29 @@ fn (mut g Gen) gen_func(func_idx int) {
 	g.resolve_all_pending()
 }
 
+// reserve_value_stack_slot allocates one result slot, preserving an existing
+// slot when several predecessor copies define the same lowered phi result.
+fn (mut g Gen) reserve_value_stack_slot(val_id int, current_offset int) int {
+	if _ := g.stack_slot(val_id) {
+		return current_offset
+	}
+	if val_id <= 0 || val_id >= g.m.values.len {
+		return current_offset
+	}
+	val := g.m.values[val_id]
+	result_size := g.m.type_size(val.typ)
+	alloc_size := if result_size > 8 && val.typ > 0 && val.typ < g.m.type_store.types.len
+		&& g.m.type_store.types[val.typ].kind == .struct_t {
+		(result_size + 7) & ~7
+	} else {
+		8
+	}
+	new_offset := current_offset + alloc_size
+	g.set_stack_slot(val_id, -new_offset)
+	return new_offset
+}
+
+// is_large_struct_type reports whether is large struct type applies in arm64.
 fn (g &Gen) is_large_struct_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
@@ -313,6 +365,7 @@ fn (g &Gen) is_large_struct_type(typ_id ssa.TypeID) bool {
 	return typ.kind == .struct_t && g.m.type_size(typ_id) > 16
 }
 
+// is_aggregate_type reports whether is aggregate type applies in arm64.
 fn (g &Gen) is_aggregate_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
@@ -321,6 +374,7 @@ fn (g &Gen) is_aggregate_type(typ_id ssa.TypeID) bool {
 	return typ.kind == .struct_t && g.m.type_size(typ_id) > 8
 }
 
+// is_zero_const reports whether is zero const applies in arm64.
 fn (g &Gen) is_zero_const(val_id int) bool {
 	if val_id <= 0 || val_id >= g.m.values.len {
 		return false
@@ -329,6 +383,7 @@ fn (g &Gen) is_zero_const(val_id int) bool {
 	return val.kind == .constant && parse_arm64_int(val.name) == 0
 }
 
+// emit_zero_aggregate emits emit zero aggregate output for arm64.
 fn (mut g Gen) emit_zero_aggregate(ptr_reg int, typ_id ssa.TypeID, max_size int) {
 	mut size := g.m.type_size(typ_id)
 	if max_size > 0 && max_size < size {
@@ -340,6 +395,7 @@ fn (mut g Gen) emit_zero_aggregate(ptr_reg int, typ_id ssa.TypeID, max_size int)
 	}
 }
 
+// aggregate_store_size supports aggregate store size handling for Gen.
 fn (g &Gen) aggregate_store_size(ptr_id int, typ_id ssa.TypeID) int {
 	mut size := g.m.type_size(typ_id)
 	if slot_size := g.stack_slot_size(ptr_id) {
@@ -356,10 +412,12 @@ fn (g &Gen) aggregate_store_size(ptr_id int, typ_id ssa.TypeID) int {
 	return size
 }
 
+// aggregate_load_size supports aggregate load size handling for Gen.
 fn (g &Gen) aggregate_load_size(ptr_id int, typ_id ssa.TypeID) int {
 	return g.aggregate_store_size(ptr_id, typ_id)
 }
 
+// stack_slot_size supports stack slot size handling for Gen.
 fn (g &Gen) stack_slot_size(ptr_id int) ?int {
 	mut cur := ptr_id
 	mut slot_size := 0
@@ -424,6 +482,7 @@ fn (g &Gen) stack_slot_size(ptr_id int) ?int {
 	return none
 }
 
+// stack_alloca_remaining supports stack alloca remaining handling for Gen.
 fn (g &Gen) stack_alloca_remaining(ptr_id int) ?int {
 	mut cur := ptr_id
 	mut total_offset := 0
@@ -472,6 +531,7 @@ fn (g &Gen) stack_alloca_remaining(ptr_id int) ?int {
 	return none
 }
 
+// gen_instr emits instr output for arm64.
 fn (mut g Gen) gen_instr(val_id int) {
 	if val_id <= 0 || val_id >= g.m.values.len {
 		return
@@ -958,6 +1018,7 @@ fn (mut g Gen) gen_instr(val_id int) {
 	}
 }
 
+// gen_call emits call output for arm64.
 fn (mut g Gen) gen_call(val_id int, instr ssa.Instruction) {
 	if instr.operands.len < 1 {
 		return
@@ -1173,6 +1234,7 @@ fn (mut g Gen) gen_call(val_id int, instr ssa.Instruction) {
 	}
 }
 
+// call_returns_float updates call returns float state for Gen.
 fn (g &Gen) call_returns_float(fn_ref ssa.Value) bool {
 	if fn_ref.kind == .func_ref && fn_ref.index >= 0 && fn_ref.index < g.m.funcs.len {
 		return g.is_float_type(g.m.funcs[fn_ref.index].typ)
@@ -1202,6 +1264,7 @@ fn (mut g Gen) load_float_bits_to_reg(val_id int, reg int) {
 	g.load_val(val_id, reg)
 }
 
+// call_stack_arg_size updates call stack arg size state for Gen.
 fn (g &Gen) call_stack_arg_size(instr ssa.Instruction) int {
 	mut arg_reg := 0
 	mut float_reg := 0
@@ -1242,6 +1305,7 @@ fn (g &Gen) call_stack_arg_size(instr ssa.Instruction) int {
 	return (stack_words * 8 + 15) & ~0xF
 }
 
+// emit_value_address emits emit value address output for arm64.
 fn (mut g Gen) emit_value_address(val_id int, reg int) bool {
 	if val_id <= 0 || val_id >= g.m.values.len {
 		return false
@@ -1265,6 +1329,12 @@ fn (mut g Gen) emit_value_address(val_id int, reg int) bool {
 				return true
 			}
 		}
+		.phi_result {
+			if off := g.stack_slot(val_id) {
+				g.emit_lea_fp(reg, off)
+				return true
+			}
+		}
 		.argument {
 			if off := g.stack_slot(val_id) {
 				g.emit_lea_fp(reg, off)
@@ -1277,6 +1347,7 @@ fn (mut g Gen) emit_value_address(val_id int, reg int) bool {
 	return false
 }
 
+// emit_copy_ptr_to_fp converts emit copy ptr to fp data for arm64.
 fn (mut g Gen) emit_copy_ptr_to_fp(src_ptr_reg int, dst_off int, size int) {
 	n_words := (size + 7) / 8
 	tmp_reg := if src_ptr_reg == 8 { 10 } else { 8 }
@@ -1288,6 +1359,7 @@ fn (mut g Gen) emit_copy_ptr_to_fp(src_ptr_reg int, dst_off int, size int) {
 
 // ==================== Value loading/storing ====================
 
+// load_val reads load val input for arm64.
 fn (mut g Gen) load_val(val_id int, reg int) int {
 	if val_id <= 0 || val_id >= g.m.values.len {
 		g.emit_mov_imm(reg, 0)
@@ -1333,6 +1405,14 @@ fn (mut g Gen) load_val(val_id int, reg int) int {
 			g.emit_mov_imm(reg, 0)
 			return reg
 		}
+		.phi_result {
+			if off := g.stack_slot(val_id) {
+				g.emit_load_fp(reg, off)
+				return reg
+			}
+			g.emit_mov_imm(reg, 0)
+			return reg
+		}
 		.argument {
 			if off := g.stack_slot(val_id) {
 				g.emit_load_fp(reg, off)
@@ -1348,6 +1428,7 @@ fn (mut g Gen) load_val(val_id int, reg int) int {
 	}
 }
 
+// store_val supports store val handling for Gen.
 fn (mut g Gen) store_val(reg int, val_id int) {
 	if off := g.stack_slot(val_id) {
 		g.emit_store_fp(reg, off)
@@ -1356,6 +1437,7 @@ fn (mut g Gen) store_val(reg int, val_id int) {
 
 // ==================== String materialization ====================
 
+// materialize_string supports materialize string handling for Gen.
 fn (mut g Gen) materialize_string(val_id int, reg int) {
 	val := g.m.values[val_id]
 	str_content := val.name
@@ -1380,11 +1462,18 @@ fn (mut g Gen) materialize_string(val_id int, reg int) {
 	g.macho.add_reloc(g.macho.text_data.len, str_sym_idx, arm64_reloc_pageoff12, false)
 	g.emit32(asm_add_pageoff(Reg(reg)))
 
-	g.emit_mov_imm(10, i64(str_len))
+	// x10 holds the string struct's second 8-byte word: `len` in the low 32 bits and
+	// `is_lit` in the high 32 bits (matching `string{ str, len int, is_lit int }`).
+	// Every caller stores/moves x10 as that whole word, so set is_lit=1 here: string
+	// literals point at static data and must NOT be passed to free() (`string.free`
+	// returns early only when is_lit==1). Without this, freeing a literal (e.g. the
+	// `mut res := ''` in os.real_path) aborts with a libmalloc "pointer not allocated".
+	g.emit_mov_imm(10, i64(str_len) | i64(u64(1) << 32))
 }
 
 // ==================== Global access ====================
 
+// emit_global_addr emits emit global addr output for arm64.
 fn (mut g Gen) emit_global_addr(reg int, name string) {
 	sym_name := '_' + name
 	mut sym_idx := 0
@@ -1399,6 +1488,7 @@ fn (mut g Gen) emit_global_addr(reg int, name string) {
 	g.emit32(asm_add_pageoff(Reg(reg)))
 }
 
+// find_global_idx_by_name resolves find global idx by name information for arm64.
 fn (g &Gen) find_global_idx_by_name(name string) int {
 	for i, global in g.m.globals {
 		if global.name == name {
@@ -1408,6 +1498,7 @@ fn (g &Gen) find_global_idx_by_name(name string) int {
 	return -1
 }
 
+// store_entry_arg_to_global converts store entry arg to global data for arm64.
 fn (mut g Gen) store_entry_arg_to_global(reg int, global_name string) {
 	global_idx := g.find_global_idx_by_name(global_name)
 	if global_idx < 0 {
@@ -1419,6 +1510,7 @@ fn (mut g Gen) store_entry_arg_to_global(reg int, global_name string) {
 
 // ==================== Branch handling ====================
 
+// emit_branch_to_block converts emit branch to block data for arm64.
 fn (mut g Gen) emit_branch_to_block(blk_id int) {
 	if blk_id >= 0 && blk_id < g.block_offsets.len && g.block_offsets[blk_id] >= 0 {
 		target := g.block_offsets[blk_id]
@@ -1433,6 +1525,7 @@ fn (mut g Gen) emit_branch_to_block(blk_id int) {
 	}
 }
 
+// emit_phi_edge_copies emits emit phi edge copies output for arm64.
 fn (mut g Gen) emit_phi_edge_copies(from_blk int, to_blk int) {
 	if to_blk < 0 || to_blk >= g.m.blocks.len {
 		return
@@ -1460,6 +1553,7 @@ fn (mut g Gen) emit_phi_edge_copies(from_blk int, to_blk int) {
 	}
 }
 
+// emit_phi_copy_value emits emit phi copy value output for arm64.
 fn (mut g Gen) emit_phi_copy_value(src_id int, dst_id int) {
 	if dst_id <= 0 || dst_id >= g.m.values.len {
 		return
@@ -1503,6 +1597,7 @@ fn (mut g Gen) emit_phi_copy_value(src_id int, dst_id int) {
 	g.store_val(8, dst_id)
 }
 
+// resolve_pending_jmps resolves resolve pending jmps information for arm64.
 fn (mut g Gen) resolve_pending_jmps(blk_id int) {
 	target := g.macho.text_data.len
 	mut remaining := []PendingJmp{}
@@ -1517,6 +1612,7 @@ fn (mut g Gen) resolve_pending_jmps(blk_id int) {
 	g.pending_jmps = remaining
 }
 
+// resolve_all_pending resolves resolve all pending information for arm64.
 fn (mut g Gen) resolve_all_pending() {
 	for pj in g.pending_jmps {
 		if pj.block_id >= 0 && pj.block_id < g.block_offsets.len
@@ -1528,6 +1624,7 @@ fn (mut g Gen) resolve_all_pending() {
 	g.pending_jmps.clear()
 }
 
+// patch_branch supports patch branch handling for Gen.
 fn (mut g Gen) patch_branch(text_pos int, offset int) {
 	existing := read_u32_le(g.macho.text_data, text_pos)
 	opcode := existing & 0xFC000000
@@ -1538,6 +1635,7 @@ fn (mut g Gen) patch_branch(text_pos int, offset int) {
 
 // ==================== Low-level emission helpers ====================
 
+// emit32 supports emit32 handling for Gen.
 fn (mut g Gen) emit32(instr u32) {
 	g.macho.text_data << u8(instr)
 	g.macho.text_data << u8(instr >> 8)
@@ -1545,6 +1643,7 @@ fn (mut g Gen) emit32(instr u32) {
 	g.macho.text_data << u8(instr >> 24)
 }
 
+// emit_mov_imm emits emit mov imm output for arm64.
 fn (mut g Gen) emit_mov_imm(reg int, val i64) {
 	if val >= 0 && val < 65536 {
 		g.emit32(asm_movz(Reg(reg), u32(val)))
@@ -1572,6 +1671,7 @@ fn (mut g Gen) emit_mov_imm(reg int, val i64) {
 	}
 }
 
+// emit_store_fp emits emit store fp output for arm64.
 fn (mut g Gen) emit_store_fp(reg int, offset int) {
 	if offset >= -255 && offset < 0 {
 		g.emit32(asm_stur(Reg(reg), fp, i32(offset)))
@@ -1584,6 +1684,7 @@ fn (mut g Gen) emit_store_fp(reg int, offset int) {
 	}
 }
 
+// emit_store_sp emits emit store sp output for arm64.
 fn (mut g Gen) emit_store_sp(reg int, offset int) {
 	if offset >= 0 && offset < 32768 && offset % 8 == 0 {
 		g.emit32(asm_str_imm(Reg(reg), sp, u32(offset / 8)))
@@ -1594,6 +1695,7 @@ fn (mut g Gen) emit_store_sp(reg int, offset int) {
 	}
 }
 
+// emit_load_fp emits emit load fp output for arm64.
 fn (mut g Gen) emit_load_fp(reg int, offset int) {
 	if offset >= -255 && offset < 0 {
 		g.emit32(asm_ldur(Reg(reg), fp, i32(offset)))
@@ -1606,6 +1708,7 @@ fn (mut g Gen) emit_load_fp(reg int, offset int) {
 	}
 }
 
+// emit_lea_fp emits emit lea fp output for arm64.
 fn (mut g Gen) emit_lea_fp(reg int, offset int) {
 	if offset >= 0 && offset < 4096 {
 		g.emit32(asm_add_imm(Reg(reg), fp, u32(offset)))
@@ -1617,6 +1720,7 @@ fn (mut g Gen) emit_lea_fp(reg int, offset int) {
 	}
 }
 
+// ptr_elem_type supports ptr elem type handling for Gen.
 fn (g &Gen) ptr_elem_type(val_id int) ssa.TypeID {
 	if val_id <= 0 || val_id >= g.m.values.len {
 		return 0
@@ -1631,33 +1735,53 @@ fn (g &Gen) ptr_elem_type(val_id int) ssa.TypeID {
 	return 0
 }
 
+// is_string_struct_type reports whether is string struct type applies in arm64.
 fn (g &Gen) is_string_struct_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
 	}
 	typ := g.m.type_store.types[typ_id]
-	if typ.kind != .struct_t || typ.fields.len != 2 || g.m.type_size(typ_id) != 16 {
+	if typ.kind != .struct_t || typ.fields.len < 2 || typ.fields.len > 3
+		|| g.m.type_size(typ_id) != 16 {
 		return false
 	}
 	first := g.m.type_store.types[typ.fields[0]]
 	second := g.m.type_store.types[typ.fields[1]]
-	return first.kind == .ptr_t && second.kind == .int_t && second.width == 32
+	if first.kind != .ptr_t || second.kind != .int_t || second.width != 32 {
+		return false
+	}
+	if typ.fields.len == 3 {
+		third := g.m.type_store.types[typ.fields[2]]
+		return third.kind == .int_t && third.width == 32
+	}
+	return true
 }
 
+// emit_load_string_regs_from_ptr converts emit load string regs from ptr data for arm64.
 fn (mut g Gen) emit_load_string_regs_from_ptr(ptr_reg int, data_reg int, len_reg int, typ_id ssa.TypeID) {
 	typ := g.m.type_store.types[typ_id]
 	g.emit_load_typed(data_reg, ptr_reg, typ.fields[0])
 	g.emit32(asm_add_imm(Reg(11), Reg(ptr_reg), 8))
-	g.emit_load_typed(len_reg, 11, typ.fields[1])
+	if typ.fields.len == 3 {
+		g.emit32(asm_ldr(Reg(len_reg), Reg(11)))
+	} else {
+		g.emit_load_typed(len_reg, 11, typ.fields[1])
+	}
 }
 
+// emit_load_string_regs_from_fp converts emit load string regs from fp data for arm64.
 fn (mut g Gen) emit_load_string_regs_from_fp(off int, data_reg int, len_reg int, typ_id ssa.TypeID) {
 	typ := g.m.type_store.types[typ_id]
 	g.emit_load_fp(data_reg, off)
-	g.emit_lea_fp(11, off + 8)
-	g.emit_load_typed(len_reg, 11, typ.fields[1])
+	if typ.fields.len == 3 {
+		g.emit_load_fp(len_reg, off + 8)
+	} else {
+		g.emit_lea_fp(11, off + 8)
+		g.emit_load_typed(len_reg, 11, typ.fields[1])
+	}
 }
 
+// emit_store_typed emits emit store typed output for arm64.
 fn (mut g Gen) emit_store_typed(src_reg int, ptr_reg int, typ ssa.TypeID) {
 	size := g.m.type_size(typ)
 	match size {
@@ -1668,6 +1792,7 @@ fn (mut g Gen) emit_store_typed(src_reg int, ptr_reg int, typ ssa.TypeID) {
 	}
 }
 
+// emit_load_typed emits emit load typed output for arm64.
 fn (mut g Gen) emit_load_typed(dst_reg int, ptr_reg int, typ ssa.TypeID) {
 	size := g.m.type_size(typ)
 	match size {
@@ -1696,6 +1821,7 @@ fn (mut g Gen) emit_load_typed(dst_reg int, ptr_reg int, typ ssa.TypeID) {
 	}
 }
 
+// is_signed_int_type reports whether is signed int type applies in arm64.
 fn (g &Gen) is_signed_int_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
@@ -1704,6 +1830,7 @@ fn (g &Gen) is_signed_int_type(typ_id ssa.TypeID) bool {
 	return typ.kind == .int_t && !typ.is_unsigned
 }
 
+// is_float_type reports whether is float type applies in arm64.
 fn (g &Gen) is_float_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
@@ -1711,6 +1838,7 @@ fn (g &Gen) is_float_type(typ_id ssa.TypeID) bool {
 	return g.m.type_store.types[typ_id].kind == .float_t
 }
 
+// is_f32_type reports whether is f32 type applies in arm64.
 fn (g &Gen) is_f32_type(typ_id ssa.TypeID) bool {
 	if typ_id <= 0 || typ_id >= g.m.type_store.types.len {
 		return false
@@ -1803,6 +1931,7 @@ fn (mut g Gen) gen_float_binop(fop ssa.OpCode, lhs_id int, rhs_id int, val_id in
 	g.store_float_result(val_id)
 }
 
+// emit_sub_sp emits emit sub sp output for arm64.
 fn (mut g Gen) emit_sub_sp(size int) {
 	if size > 0 && size < 4096 {
 		g.emit32(asm_sub_imm(sp, sp, u32(size)))
@@ -1812,6 +1941,7 @@ fn (mut g Gen) emit_sub_sp(size int) {
 	}
 }
 
+// emit_add_sp emits emit add sp output for arm64.
 fn (mut g Gen) emit_add_sp(size int) {
 	if size > 0 && size < 4096 {
 		g.emit32(asm_add_imm(sp, sp, u32(size)))
@@ -1821,6 +1951,7 @@ fn (mut g Gen) emit_add_sp(size int) {
 	}
 }
 
+// parse_arm64_int reads parse arm64 int input for arm64.
 fn parse_arm64_int(s string) i64 {
 	if s.len == 0 {
 		return 0

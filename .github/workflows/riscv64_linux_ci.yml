@@ -6,6 +6,7 @@ on:
     branches:
       - master
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/riscv64_linux_ci.yml'
@@ -13,11 +14,16 @@ on:
       - '!cmd/tools/builders/**.v'
   pull_request:
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/riscv64_linux_ci.yml'
       - 'cmd/tools/**'
       - '!cmd/tools/builders/**.v'
+
+concurrency:
+  group: riscv64-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   riscv64_linux:

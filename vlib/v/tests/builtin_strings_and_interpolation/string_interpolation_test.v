@@ -167,10 +167,13 @@ fn int_ref_string(n &int) string {
 fn test_int_ref_string_interpolation() {
 	mut count := 10
 	count_ref := &count
+	// `mut &int` params are auto-dereferenced, so they still interpolate as the value
 	assert int_ref_mut_string(mut &count) == '10'
-	assert int_ref_string(&count) == '10'
-	assert '${count_ref}' == '10'
-	assert '${&count}' == '10'
+	// a plain reference to a scalar interpolates as its address (Go `%v` semantics)
+	assert int_ref_string(&count) == '${voidptr(count_ref)}'
+	assert '${count_ref}' == '${voidptr(count_ref)}'
+	assert '${&count}' == '${voidptr(count_ref)}'
+	// an explicit format specifier still applies to the pointed-to value
 	assert '${count_ref:x}' == 'a'
 }
 
@@ -295,4 +298,10 @@ fn test_float_exponent_sign() {
 	assert '${a:6.1e}' == '1.2e+09'
 	assert '${a:6.2e}' == '1.23e+09'
 	assert '${a:6.5e}' == '1.23457e+09'
+}
+
+const float_literal_zero_for_interpolation = 0.0
+
+fn test_const_float_literal_string_interpolation() {
+	assert '${float_literal_zero_for_interpolation}' == '0.0'
 }

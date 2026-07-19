@@ -280,7 +280,7 @@ fn (mut w Walker) mark_json2_optional_field_helpers(concrete_typ ast.Type) {
 		return
 	}
 	struct_info := concrete_sym.info as ast.Struct
-	if mut create_value_from_optional_fn := w.all_fns['x.json2.create_value_from_optional'] {
+	if mut create_value_from_optional_fn := w.all_fns['json2.create_value_from_optional'] {
 		for field in struct_info.fields {
 			if field.typ.has_flag(.option) {
 				w.fn_decl_with_concrete_types(mut create_value_from_optional_fn, [
@@ -318,9 +318,9 @@ fn (mut w Walker) mark_json2_encode_field_helpers(receiver_typ ast.Type, concret
 	} else {
 		ast.FnDecl{}
 	}
-	mut struct_field_is_none_fn := w.all_fns['x.json2.struct_field_is_none'] or { ast.FnDecl{} }
-	mut struct_field_is_nil_fn := w.all_fns['x.json2.struct_field_is_nil'] or { ast.FnDecl{} }
-	mut check_not_empty_fn := w.all_fns['x.json2.check_not_empty'] or { ast.FnDecl{} }
+	mut struct_field_is_none_fn := w.all_fns['json2.struct_field_is_none'] or { ast.FnDecl{} }
+	mut struct_field_is_nil_fn := w.all_fns['json2.struct_field_is_nil'] or { ast.FnDecl{} }
+	mut check_not_empty_fn := w.all_fns['json2.check_not_empty'] or { ast.FnDecl{} }
 	for field in struct_info.fields {
 		if field.is_embed {
 			continue
@@ -510,7 +510,7 @@ fn (mut w Walker) record_used_fn_generic_types(fkey string, concrete_types []ast
 fn (w &Walker) fn_generic_types_key(fkey string, concrete_types []ast.Type) string {
 	mut parts := []string{cap: concrete_types.len}
 	for typ in concrete_types {
-		parts << w.table.type_to_str(typ)
+		parts << u32(typ).str()
 	}
 	return '${fkey}:${parts.join('|')}'
 }
@@ -719,12 +719,16 @@ pub fn (mut w Walker) stmt(node_ ast.Stmt) {
 			if node.is_used {
 				w.uses_asserts = true
 				w.expr(node.expr)
+				w.mark_assert_generic_str_methods(node)
 				if node.extra !is ast.EmptyExpr {
 					w.expr(node.extra)
 				}
 			}
 		}
 		ast.AssignStmt {
+			for t in node.left_types {
+				w.mark_by_type(t)
+			}
 			w.exprs(node.left)
 			w.exprs(node.right)
 		}
@@ -962,13 +966,15 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 					w.mark_by_type(w.table.find_or_register_array(sym.info.key_type))
 				}
 			} else if !node.is_method && node.args.len == 1
-				&& node.name in ['println', 'print', 'eprint', 'eprintln'] {
+				&& node.name in ['println', 'print', 'eprint', 'eprintln', 'panic'] {
 				if f := w.table.find_fn(node.name) {
 					if f.mod == 'builtin' {
 						if node.args[0].typ != ast.string_type {
 							w.uses_str[node.args[0].typ] = true
+							w.mark_generic_str_method_for_type(node.args[0].typ)
 						}
-						if w.pref.gc_mode == .boehm_leak && (node.args[0].typ != ast.string_type
+						if node.name != 'panic' && w.pref.gc_mode == .boehm_leak
+							&& (node.args[0].typ != ast.string_type
 							|| node.args[0].expr !in [ast.Ident, ast.StringLiteral, ast.SelectorExpr, ast.ComptimeSelector]) {
 							w.uses_free[ast.string_type] = true
 						}
@@ -1055,6 +1061,7 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 			w.expr(node.expr)
 			w.features.dump = true
 			w.mark_by_type(node.expr_type)
+			w.mark_generic_str_method_for_type(node.expr_type)
 		}
 		ast.SpawnExpr {
 			if node.is_expr {
@@ -1075,6 +1082,20 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 		ast.GoExpr {
 			if node.is_expr {
 				w.fn_by_name('free')
+				// A `go expr` whose handle is used as a value is lowered to the
+				// `spawn` (pthread) codegen path (see spawn_and_go_expr), since the
+				// photon coroutine wrapper returns no joinable handle. Mark the same
+				// thread-handle type and pthread error helpers that `spawn` needs,
+				// otherwise -skip-unused prunes them and the generated C fails to link.
+				w.mark_by_type(w.table.find_or_register_thread(node.call_expr.return_type))
+				w.uses_spawn = true
+				if w.pref.os == .windows {
+					w.fn_by_name('panic_lasterr')
+					w.fn_by_name('winapi_lasterr_str')
+				} else {
+					w.fn_by_name('c_error_number_str')
+					w.fn_by_name('panic_error_number')
+				}
 			}
 			w.mark_by_type(node.call_expr.return_type)
 			w.expr(node.call_expr)
@@ -1393,6 +1414,7 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 			} else {
 				w.mark_simple_string_inter_literal(node)
 			}
+			w.mark_string_inter_literal_generic_str_methods(node)
 			w.exprs(node.exprs)
 			for expr in node.fwidth_exprs {
 				if expr !is ast.EmptyExpr {
@@ -1506,6 +1528,13 @@ fn (mut w Walker) expr(node_ ast.Expr) {
 		}
 		ast.Comment {}
 		ast.EnumVal {
+			if w.table.final_sym(node.typ).kind == .function {
+				// A forward-referenced static method value is parsed as an EnumVal,
+				// because its declaration is not known to the parser yet. The checker
+				// resolves its function type, so retain the method just like an Ident
+				// function value.
+				w.fn_by_name('${node.enum_name}__static__${node.val}')
+			}
 			if e := w.table.enum_decls[node.enum_name] {
 				filtered := e.fields.filter(it.name == node.val)
 				if filtered.len != 0 && filtered[0].expr !is ast.EmptyExpr {
@@ -1577,7 +1606,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 		return
 	}
 	w.mark_fn_as_used(fkey)
-	if node.mod == 'x.json2' {
+	if node.mod == 'json2' {
 		w.mark_by_sym_name('EnumData')
 		w.mark_by_sym_name('time.Time')
 	}
@@ -1659,15 +1688,15 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 	prev_cur_fn := w.cur_fn
 	w.cur_fn = fkey
 	w.cur_fn_concrete_types = resolved_concrete_types
-	if node.mod == 'x.json2' && node.name == 'get_decoded_sumtype_workaround'
+	if node.mod == 'json2' && node.name == 'get_decoded_sumtype_workaround'
 		&& w.has_sumtype_generic_context(resolved_concrete_types) {
-		if mut copy_fn := w.all_fns['x.json2.copy_type'] {
+		if mut copy_fn := w.all_fns['json2.copy_type'] {
 			for concrete_type_list in w.sumtype_variant_concrete_types(resolved_concrete_types) {
 				w.fn_decl_with_concrete_types(mut copy_fn, concrete_type_list)
 			}
 		}
 	}
-	if node.mod == 'x.json2' && node.name == 'get_struct_type_workaround'
+	if node.mod == 'json2' && node.name == 'get_struct_type_workaround'
 		&& w.has_sumtype_generic_context(resolved_concrete_types) {
 		check_struct_type_valid_fkey, _ := w.resolve_method_fkey_for_type(node.receiver.typ,
 			'check_struct_type_valid')
@@ -1687,7 +1716,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 			}
 		}
 	}
-	if node.mod == 'x.json2' && node.name == 'decode_value' && node.is_method
+	if node.mod == 'json2' && node.name == 'decode_value' && node.is_method
 		&& resolved_concrete_types.len == 1 {
 		concrete_typ := w.table.unaliased_type(resolved_concrete_types[0])
 		concrete_sym := w.table.final_sym(concrete_typ)
@@ -1701,24 +1730,24 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 			}
 		}
 		if concrete_sym.kind == .struct && concrete_sym.name != 'time.Time' {
-			if mut decode_struct_key_fn := w.all_fns['x.json2.decode_struct_key'] {
+			if mut decode_struct_key_fn := w.all_fns['json2.decode_struct_key'] {
 				w.fn_decl_with_concrete_types(mut decode_struct_key_fn, resolved_concrete_types)
 			}
-			if mut check_required_struct_fields_fn := w.all_fns['x.json2.check_required_struct_fields'] {
+			if mut check_required_struct_fields_fn := w.all_fns['json2.check_required_struct_fields'] {
 				w.fn_decl_with_concrete_types(mut check_required_struct_fields_fn,
 					resolved_concrete_types)
 			}
 			w.mark_json2_optional_field_helpers(concrete_typ)
 		}
 	}
-	if node.mod == 'x.json2' && node.name == 'decode_struct_key' && resolved_concrete_types.len == 1 {
+	if node.mod == 'json2' && node.name == 'decode_struct_key' && resolved_concrete_types.len == 1 {
 		w.mark_json2_optional_field_helpers(resolved_concrete_types[0])
 	}
-	if node.mod == 'x.json2' && node.name == 'decode_enum' {
+	if node.mod == 'json2' && node.name == 'decode_enum' {
 		w.uses_ct_values = true
 		w.mark_by_sym_name('EnumData')
 	}
-	if node.mod == 'x.json2' && node.name == 'encode_value' && node.is_method
+	if node.mod == 'json2' && node.name == 'encode_value' && node.is_method
 		&& resolved_concrete_types.len == 1 {
 		concrete_typ := w.table.unaliased_type(resolved_concrete_types[0])
 		concrete_sym := w.table.final_sym(concrete_typ)
@@ -1749,7 +1778,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 		if concrete_sym.kind == .struct {
 			w.mark_json2_encode_field_helpers(node.receiver.typ, concrete_typ)
 		}
-		json_encoder_typ := w.table.find_type('x.json2.JsonEncoder')
+		json_encoder_typ := w.table.find_type('json2.JsonEncoder')
 		if json_encoder_typ != 0
 			&& w.table.does_type_implement_interface(concrete_typ, json_encoder_typ) {
 			to_json_fkey, _ := w.resolve_method_fkey_for_type(concrete_typ, 'to_json')
@@ -1757,7 +1786,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 				w.fn_by_name(to_json_fkey)
 			}
 		}
-		encodable_typ := w.table.find_type('x.json2.Encodable')
+		encodable_typ := w.table.find_type('json2.Encodable')
 		if encodable_typ != 0 && w.table.does_type_implement_interface(concrete_typ, encodable_typ) {
 			json_str_fkey, _ := w.resolve_method_fkey_for_type(concrete_typ, 'json_str')
 			if json_str_fkey != '' {
@@ -1765,7 +1794,7 @@ fn (mut w Walker) fn_decl_with_concrete_types(mut node ast.FnDecl, concrete_type
 			}
 		}
 	}
-	if node.mod == 'x.json2' && node.name == 'encode_struct_fields'
+	if node.mod == 'json2' && node.name == 'encode_struct_fields'
 		&& resolved_concrete_types.len == 1 {
 		w.mark_json2_encode_field_helpers(node.receiver.typ, resolved_concrete_types[0])
 	}
@@ -1926,8 +1955,12 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 						continue
 					}
 					for i, ct in concrete_type_list {
-						if ct == resolved_left_type && w.cur_fn_concrete_types[i] != ct {
-							resolved_left_type = w.cur_fn_concrete_types[i]
+						// compare by idx: the stale type may differ in nr_muls
+						// (e.g. `for mut item in items` makes it a reference)
+						if ct.idx() == resolved_left_type.idx()
+							&& w.cur_fn_concrete_types[i].idx() != ct.idx() {
+							resolved_left_type =
+								w.cur_fn_concrete_types[i].set_nr_muls(resolved_left_type.nr_muls())
 							break
 						}
 					}
@@ -2016,7 +2049,7 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 		}
 	}
 	if node.is_method {
-		resolved_fkey, resolved_receiver := w.resolve_method_call_fkey(node)
+		resolved_fkey, resolved_receiver := w.resolve_method_call_fkey(node, resolved_left_type)
 		if resolved_fkey != '' {
 			fn_name = resolved_fkey
 			receiver_typ = resolved_receiver
@@ -2162,7 +2195,7 @@ pub fn (mut w Walker) call_expr(mut node ast.CallExpr) {
 					w.fn_decl_with_concrete_types(mut stmt, call_concrete_types)
 					if node.raw_concrete_types.len == 0 && w.inside_comptime > 0
 						&& w.has_sumtype_generic_context(caller_concrete_types)
-						&& stmt.mod == 'x.json2' && stmt.name in ['copy_type', 'decode_value'] {
+						&& stmt.mod == 'json2' && stmt.name in ['copy_type', 'decode_value'] {
 						for concrete_type_list in w.sumtype_variant_concrete_types(caller_concrete_types) {
 							if concrete_type_list != call_concrete_types {
 								w.fn_decl_with_concrete_types(mut stmt, concrete_type_list)
@@ -2317,8 +2350,14 @@ fn (w &Walker) method_decl_fkey(method ast.Fn) (string, ast.Type) {
 	return method.fkey(), method.receiver_type
 }
 
-fn (mut w Walker) resolve_method_call_fkey(node ast.CallExpr) (string, ast.Type) {
+fn (mut w Walker) resolve_method_call_fkey(node ast.CallExpr, resolved_left_type ast.Type) (string, ast.Type) {
 	mut candidate_types := []ast.Type{}
+	// Prefer the re-resolved left type: inside generic functions the AST types
+	// are stale (they reflect the last checked instantiation, not the current one).
+	if resolved_left_type != 0 && resolved_left_type != node.left_type
+		&& !resolved_left_type.has_flag(.generic) {
+		candidate_types << resolved_left_type
+	}
 	if node.left is ast.Ident && node.left.obj is ast.Var {
 		resolved_current_type := w.resolve_current_specialized_var_type(node.left.name)
 		if resolved_current_type != 0 && resolved_current_type !in candidate_types {
@@ -2786,6 +2825,48 @@ fn (mut w Walker) string_inter_literal_uses_isnil(node ast.StringInterLiteral) b
 	return false
 }
 
+fn (mut w Walker) mark_string_inter_literal_generic_str_methods(node ast.StringInterLiteral) {
+	for i in 0 .. node.exprs.len {
+		if i >= node.expr_types.len {
+			break
+		}
+		w.mark_generic_str_method_for_type(node.expr_types[i])
+	}
+}
+
+fn (mut w Walker) mark_assert_generic_str_methods(node ast.AssertStmt) {
+	if node.expr is ast.InfixExpr {
+		w.mark_generic_str_method_for_type(node.expr.left_type)
+		w.mark_generic_str_method_for_type(node.expr.right_type)
+	}
+}
+
+fn (mut w Walker) mark_generic_str_method_for_type(source_typ ast.Type) {
+	typ := w.resolve_current_generic_type(source_typ)
+	if typ == 0 || typ == ast.void_type || typ == ast.string_type {
+		return
+	}
+	fkey, _ := w.resolve_method_fkey_for_type(typ, 'str')
+	if fkey == '' {
+		return
+	}
+	concrete_type_lists := w.table.fn_generic_types[fkey]
+	if concrete_type_lists.len == 0 {
+		return
+	}
+	for concrete_types in concrete_type_lists {
+		if concrete_types.len == 0 {
+			continue
+		}
+		w.record_used_fn_generic_types(fkey, concrete_types)
+		if mut fn_decl := w.all_fns[fkey] {
+			w.fn_decl_with_concrete_types(mut fn_decl, concrete_types)
+		} else {
+			w.mark_fn_as_used(fkey)
+		}
+	}
+}
+
 fn (mut w Walker) mark_simple_string_inter_literal(node ast.StringInterLiteral) {
 	if node.vals.any(it.len > 0) && !w.uses_str_literal {
 		w.mark_by_sym_name('string')
@@ -3177,6 +3258,11 @@ pub fn (mut w Walker) mark_by_sym(isym ast.TypeSymbol) {
 			}
 		}
 		ast.Interface {
+			// Include implementors that require a mutable receiver (stored in
+			// `mut_types`, not `types`); otherwise interface methods reached only
+			// via dispatch on a `mut` receiver are never walked, and symbols they
+			// reference (e.g. an anon fn passed to a C callback) get pruned by
+			// -skip-unused. See https://github.com/vlang/v/issues/27354
 			for typ in isym.info.implementor_types(true) {
 				if typ == ast.map_type {
 					w.features.used_maps++

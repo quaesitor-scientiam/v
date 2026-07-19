@@ -2,12 +2,14 @@ module optimize
 
 import v3.ssa
 
+// verify_ssa validates verify ssa state for optimize.
 fn verify_ssa(m &ssa.Module, stage string) {
 	verify_module_indexes(m, stage)
 	verify_functions(m, stage)
 	verify_uses(m, stage)
 }
 
+// verify_module_indexes validates verify module indexes state for optimize.
 fn verify_module_indexes(m &ssa.Module, stage string) {
 	for vi in 0 .. m.values.len {
 		if m.values[vi].id != vi {
@@ -33,6 +35,7 @@ fn verify_module_indexes(m &ssa.Module, stage string) {
 	}
 }
 
+// verify_functions validates verify functions state for optimize.
 fn verify_functions(m &ssa.Module, stage string) {
 	for fi in 0 .. m.funcs.len {
 		func := m.funcs[fi]
@@ -60,6 +63,7 @@ fn verify_functions(m &ssa.Module, stage string) {
 	}
 }
 
+// verify_block_instrs validates verify block instrs state for optimize.
 fn verify_block_instrs(m &ssa.Module, stage string, fi int, blk_id int, func_blocks map[int]bool) {
 	blk := m.blocks[blk_id]
 	if blk.instrs.len == 0 {
@@ -87,8 +91,12 @@ fn verify_block_instrs(m &ssa.Module, stage string, fi int, blk_id int, func_blo
 	}
 }
 
+// verify_instruction_operands validates verify instruction operands state for optimize.
 fn verify_instruction_operands(m &ssa.Module, stage string, fi int, blk_id int, val_id int, instr ssa.Instruction, func_blocks map[int]bool, is_final bool) {
-	for op_id in instr.value_operands() {
+	for oi, op_id in instr.operands {
+		if !instr.is_value_operand(oi) {
+			continue
+		}
 		if op_id <= 0 || op_id >= m.values.len {
 			verify_fail(stage,
 				'instruction value ${val_id} in block ${blk_id} uses invalid value ${op_id}')
@@ -141,10 +149,23 @@ fn verify_instruction_operands(m &ssa.Module, stage string, fi int, blk_id int, 
 					'phi predecessor')
 			}
 		}
+		.assign {
+			if instr.operands.len != 2 {
+				verify_fail(stage,
+					'assign value ${val_id} in block ${blk_id} has ${instr.operands.len} operands')
+			} else {
+				dest := instr.operands[0]
+				if dest <= 0 || dest >= m.values.len || m.values[dest].kind != .phi_result {
+					verify_fail(stage,
+						'assign value ${val_id} in block ${blk_id} has invalid destination ${dest}')
+				}
+			}
+		}
 		else {}
 	}
 }
 
+// verify_target_block validates verify target block state for optimize.
 fn verify_target_block(m &ssa.Module, stage string, fi int, blk_id int, target_id int, func_blocks map[int]bool, label string) {
 	if !verify_block_id(m, stage, target_id, fi, '${label} target from block ${blk_id}') {
 		return
@@ -155,27 +176,17 @@ fn verify_target_block(m &ssa.Module, stage string, fi int, blk_id int, target_i
 	}
 }
 
+// verify_cfg_edges validates verify cfg edges state for optimize.
 fn verify_cfg_edges(m &ssa.Module, stage string, fi int, blk_id int, func_blocks map[int]bool) {
 	blk := m.blocks[blk_id]
 	mut expected_succs := []int{}
 	if blk.instrs.len > 0 {
 		term_val_id := blk.instrs.last()
 		term := m.instrs[m.values[term_val_id].index]
-		match term.op {
-			.jmp {
-				if term.operands.len == 1 {
-					expected_succs << int(term.operands[0])
-				}
+		for oi, operand in term.operands {
+			if term.is_successor_operand(oi) && int(operand) !in expected_succs {
+				expected_succs << int(operand)
 			}
-			.br {
-				if term.operands.len == 3 {
-					expected_succs << int(term.operands[1])
-					if term.operands[2] != term.operands[1] {
-						expected_succs << int(term.operands[2])
-					}
-				}
-			}
-			else {}
 		}
 	}
 	verify_same_blocks(stage, 'successors for block ${blk_id}', expected_succs, blk.succs)
@@ -204,6 +215,7 @@ fn verify_cfg_edges(m &ssa.Module, stage string, fi int, blk_id int, func_blocks
 	}
 }
 
+// verify_uses validates verify uses state for optimize.
 fn verify_uses(m &ssa.Module, stage string) {
 	mut expected_uses := map[int][]int{}
 	for func in m.funcs {
@@ -216,7 +228,10 @@ fn verify_uses(m &ssa.Module, stage string) {
 					continue
 				}
 				instr := m.instrs[m.values[val_id].index]
-				for op_id in instr.value_operands() {
+				for oi, op_id in instr.operands {
+					if !instr.is_value_operand(oi) {
+						continue
+					}
 					if op_id > 0 && op_id < m.values.len {
 						if !arr_contains(expected_uses[op_id], val_id) {
 							expected_uses[op_id] << val_id
@@ -231,6 +246,7 @@ fn verify_uses(m &ssa.Module, stage string) {
 	}
 }
 
+// verify_block_id validates verify block id state for optimize.
 fn verify_block_id(m &ssa.Module, stage string, blk_id int, fi int, context string) bool {
 	if blk_id < 0 || blk_id >= m.blocks.len {
 		verify_fail(stage, '${context} references invalid block ${blk_id} in function ${fi}')
@@ -239,6 +255,7 @@ fn verify_block_id(m &ssa.Module, stage string, blk_id int, fi int, context stri
 	return true
 }
 
+// verify_same_blocks validates verify same blocks state for optimize.
 fn verify_same_blocks(stage string, label string, expected []int, actual []int) {
 	if expected.len != actual.len {
 		verify_fail(stage, '${label}: expected ${expected}, got ${actual}')
@@ -255,6 +272,7 @@ fn verify_same_blocks(stage string, label string, expected []int, actual []int) 
 	}
 }
 
+// verify_fail validates verify fail state for optimize.
 fn verify_fail(stage string, msg string) {
 	panic('SSA verifier failed after ${stage}: ${msg}')
 }

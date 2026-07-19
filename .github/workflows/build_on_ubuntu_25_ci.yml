@@ -6,6 +6,7 @@ on:
     branches:
       - master
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/build_on_ubuntu_25_ci.yml'
@@ -13,11 +14,16 @@ on:
       - '!cmd/tools/builders/**.v'
   pull_request:
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/build_on_ubuntu_25_ci.yml'
       - 'cmd/tools/**'
       - '!cmd/tools/builders/**.v'
+
+concurrency:
+  group: ubuntu-25-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ubuntu-25-gcc-14-2-build:

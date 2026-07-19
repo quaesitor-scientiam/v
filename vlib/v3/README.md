@@ -3,10 +3,11 @@
 Clean rewrite of the V compiler. Reuses v2's scanner, uses a flat AST parser
 with Pratt parsing, a structured type system with sum-type variants, lexical
 scoping, a transformer for AST simplification, a shared type-checking phase, a
-markused pass for dead-code elimination, recursive import resolution, and two
-backends: a direct flat-AST-to-C backend and a native ARM64 backend via SSA IR
-with a built-in linker. With `-prod`, the ARM64 backend runs SSA optimization,
-MIR lowering, and instruction selection.
+markused pass for dead-code elimination, recursive import resolution, and three
+backends: a direct flat-AST-to-C backend, a native ARM64 backend via SSA IR with
+a built-in linker, and a direct flat-AST-to-WebAssembly backend. With `-prod`,
+the ARM64 backend runs SSA optimization, MIR lowering, and instruction
+selection.
 
 Imports all `vlib/builtin/` V source files, both pure V (`.v`) and C-interop
 (`.c.v`), for struct, enum, type alias, interface, C function declarations, and
@@ -16,13 +17,36 @@ skips the other, so no AST nodes or transformer pass is needed for `$if` blocks.
 `#include` and `#flag` directives inside `$if` blocks are handled correctly: the
 scanner consumes the entire directive line as a single token, preventing the
 parser from reading past block boundaries. File selection filters out
-arch-specific files (`.arm64.v`, `.amd64.v`) and deduplicates function
+arch-specific files (`.arm64.v`, `.amd64.v`) against the selected target and deduplicates function
 definitions when both `.v` and `.c.v` files exist. C runtime functions
 (println, string ops, int_str, etc.) are still provided via a built-in preamble;
 builtin function bodies are skipped during C code generation. Maps use the
 builtin `map` type name and API (`new_map`, `map__set`, `map__get`,
 `map__delete`, etc.) with a simplified open-addressing implementation until v3
 can compile the full builtin map.v.
+
+## Target selection
+
+The C backend accepts `-os <name>` and `-arch <name>`. The target controls source-file suffix
+selection, `$if` conditions, target-qualified `#flag` and `#include` directives, shared-library
+suffixes, and third-party object-cache keys. Common aliases such as `darwin`, `x86_64`, and
+`aarch64` are normalized. Native linking currently supports the host target and macOS
+`amd64`/`arm64` cross-architecture builds through Clang's `-arch`; other cross targets can be
+emitted as C with `-o file.c` for compilation by an external target toolchain.
+
+The command line rejects unknown options, missing option values, unsupported backends, and
+multiple input paths. `-cc <executable>` selects the C compiler and `-gc none` is the only
+currently supported collector mode. Directory builds read `subdirs` through the canonical
+`v.mod` parser, including when other manifest strings contain punctuation resembling fields.
+The driver monitors compiler memory throughout the build and exits when it reaches 10 GiB.
+On macOS it uses physical footprint, matching Activity Monitor more closely; elsewhere it uses
+current RSS. Pass `-no-memory-limit`/`--no-memory-limit` to disable this safety limit.
+On macOS, each stage benchmark prints physical footprint immediately after RSS.
+
+Generated C represents `thread` values with a typed wrapper around `pthread_t`. `spawn` uses the
+platform's default thread stack and checks allocation, thread creation, and join failures. Since
+V's `spawn` expression has no error return, these runtime failures print a diagnostic and abort;
+packed arguments are released if thread creation fails.
 
 The type system (`types/`) uses a `Type` sum type with 20 variants instead of
 string-based type checks. Primitive types use a `Properties` flag enum with
@@ -57,14 +81,39 @@ Imports are resolved recursively: after parsing the input file, the driver
 collects `import_decl` nodes, resolves module paths, parses module files, and
 repeats until no new imports are found.
 
+For C executable and library builds, v3 caches each imported module as a
+declaration-only `.vh` file and a compiled `.o` file. A module object is rebuilt
+when its source content, compiler implementation, target, or relevant build
+configuration changes. `builtin`, `strconv`, `strings`, `hash`, `bits`, and
+`math.bits` share one `builtin.o`, matching the v2 core-cache layout. Cache files live under
+the V temporary directory by default; set `V3CACHE` to select another root, or
+pass `-nocache`/`--no-cache` to disable the module cache. C-only `-o file.c`
+builds do not use the object cache.
+
 ## Architecture
 
 ```
 source + vlib/builtin -> scanner -> flat parser -> flat AST -> imports
   -> check -> transform -> annotate types -> markused -> gen C -> cc
                                           \-> SSA build -> ARM64 gen -> link
-                                                       \-> optimize -> MIR -> insel (-prod)
+                                          |            \-> optimize -> MIR -> insel (-prod)
+                                          \-> gen WASM -> .wasm
 ```
+
+The WebAssembly backend (`-b wasm`) walks the flat AST directly, like the C
+backend, since WASM's structured control flow (`block`/`loop`/`if`/`br`) maps
+cleanly from the tree and needs no relooping. It emits a self-contained `.wasm`
+module via its own minimal binary encoder (LEB128 + section assembly, mirroring
+how the ARM64 backend ships its own `asm`/`macho`/`linker`), so v3 stays
+self-contained. The current scope is the integer/float core: functions with
+numeric/bool params and locals, arithmetic, comparison, logical (short-circuit),
+bitwise and shift operators, casts, `if`/`else`/`else if`, all `for` forms with
+`break`/`continue`, direct calls, and recursion. `print`/`println` of string
+literals, integers, and booleans is provided through WASI `fd_write` with a
+built-in `itoa` helper. The module is a WASI command (`_start` calls `main`) and
+also exports every compiled function for direct testing. Generics, strings as
+values, structs, arrays, and maps are out of scope for now. Output runs under any
+WASI runtime (e.g. `node:wasi`).
 
 The parser directly emits a flat AST. There is no recursive AST intermediate and
 no flatten step. All nodes live in a single `[]Node` array with children as
@@ -192,14 +241,22 @@ Commands:
 
 ```sh
 v -gc none -prod -o v3 v3.v
-./v3 -parallel -o v4 v3.v
+./v3 -o v4 v3.v
 ./v4 -o v5 v3.v
 ./v5 -o v6 v3.v
 ```
 
-The table uses the first v3-generated C stage, `./v3 -parallel -o v4 v3.v`.
-Bundled TCC currently rejects the atomic helper shims on macOS and the driver
-falls back to `cc`.
+The table uses the first v3-generated C stage, `./v3 -o v4 v3.v`. The plain
+bootstrap includes thread support. v3 self-hosts parallel-capable successors by
+default; pass `-no-parallel` or `--no-parallel` to disable threaded
+transform/C codegen and omit parallel support from the self-hosted compiler
+output. Debug builds use bundled TCC first, then fall back to `cc` only when
+that compile fails.
+
+Pass `-c99` to the v3 C backend to compile generated C and support objects as
+C99 (`cc -std=c99`) instead of the default GNU11 mode. `test_all.vsh -c99`
+validates the C backend and self-host chain in that mode, and skips the ARM64
+native backend step because `-c99` only applies to generated C.
 
 | Phase          | Time      | Peak RSS |
 |----------------|----------:|---------:|
