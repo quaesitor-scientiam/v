@@ -183,3 +183,127 @@ fn test_scoped_pre_dispatch_preserves_direct_array_access_flag() {
 	assert g.fn_gen_items[0].direct_array_access
 	g.release_scoped_fn_items()
 }
+
+fn test_parallel_generic_app_cache_uses_frozen_base_and_private_overlays() {
+	mut g, _ := parallel_worker_test_gen(true)
+	base, args, ok := g.shared_generic_app_parts('Frozen[int]')
+	assert ok
+	assert base == 'Frozen'
+	assert args == ['int']
+	frozen := g.generic_app_cache
+
+	g.freeze_parallel_lookup_caches()
+	assert voidptr(g.generic_app_cache) != voidptr(frozen)
+	assert voidptr(g.generic_app_cache.base) == voidptr(frozen)
+
+	mut dispatcher := g.new_parallel_dispatch_worker(1)
+	assert voidptr(dispatcher.generic_app_cache) != voidptr(g.generic_app_cache)
+	assert voidptr(dispatcher.generic_app_cache.base) == voidptr(frozen)
+	mut batch := dispatcher.new_parallel_worker(0)
+	assert voidptr(batch.generic_app_cache) != voidptr(dispatcher.generic_app_cache)
+	assert voidptr(batch.generic_app_cache.base) == voidptr(frozen)
+
+	g.shared_generic_app_parts('Shared[string]')
+	dispatcher.shared_generic_app_parts('Shared[string]')
+	batch.shared_generic_app_parts('Shared[string]')
+	assert 'Shared[string]' in g.generic_app_cache.entries
+	assert 'Shared[string]' in dispatcher.generic_app_cache.entries
+	assert 'Shared[string]' in batch.generic_app_cache.entries
+	assert 'Shared[string]' !in frozen.entries
+}
+
+fn test_parallel_type_declarations_include_body_discovered_fn_ptr_types() {
+	mut g, _ := parallel_worker_test_gen(true)
+	g.parallel_type_decls = '/* precomputed type declarations */\n'.clone()
+	encoded := 'fn_ptr:int|int'
+	name := g.resolve_fn_ptr_type(encoded)
+
+	g.write_type_declaration_block()
+	source := g.sb.str()
+	precomputed_idx := source.index('/* precomputed type declarations */') or { -1 }
+	typedef_idx := source.index('typedef int (*${name})(int);') or { -1 }
+	assert precomputed_idx >= 0
+	assert typedef_idx > precomputed_idx
+	assert g.emitted_fn_ptr_typedefs[encoded]
+}
+
+fn test_dynamic_parallel_merge_preserves_chunk_order() {
+	mut g, _ := parallel_worker_test_gen(true)
+	mut first := g.new_parallel_dispatch_worker(1)
+	first.fn_segs = ['chunk-2;', 'chunk-0;']
+	first.fn_seg_chunk_indexes = [2, 0]
+	mut second := g.new_parallel_dispatch_worker(2)
+	second.fn_segs = ['chunk-3;', 'chunk-1;']
+	second.fn_seg_chunk_indexes = [3, 1]
+	mut ordered := []string{len: 4}
+	mut ordered_wrapper_defs := []ParallelChunkWrapperDefs{len: 4}
+
+	g.merge_parallel_worker_ordered(first, mut ordered, mut ordered_wrapper_defs)
+	g.merge_parallel_worker_ordered(second, mut ordered, mut ordered_wrapper_defs)
+	assert ordered == ['chunk-0;', 'chunk-1;', 'chunk-2;', 'chunk-3;']
+}
+
+fn test_dynamic_parallel_merge_replays_wrapper_defs_in_chunk_order() {
+	mut g, _ := parallel_worker_test_gen(true)
+	mut high := g.new_parallel_dispatch_worker(1)
+	high.fn_segs = ['chunk-3;', 'chunk-2;']
+	high.fn_seg_chunk_indexes = [3, 2]
+	high.parallel_chunk_wrapper_defs = [
+		ParallelChunkWrapperDefs{
+			chunk_idx: 3
+			spawn:     ['spawn-3-typedef;', 'spawn-3-trampoline;', 'spawn-shared;']
+			callback:  ['callback-3;']
+		},
+		ParallelChunkWrapperDefs{
+			chunk_idx: 2
+			spawn:     ['spawn-2-typedef;', 'spawn-2-trampoline;']
+			callback:  ['callback-2;']
+		},
+	]
+
+	mut low := g.new_parallel_dispatch_worker(2)
+	low.fn_segs = ['chunk-1;', 'chunk-0;']
+	low.fn_seg_chunk_indexes = [1, 0]
+	low.parallel_chunk_wrapper_defs = [
+		ParallelChunkWrapperDefs{
+			chunk_idx: 1
+			spawn:     ['spawn-1-typedef;', 'spawn-1-trampoline;']
+			callback:  ['callback-1;']
+		},
+		ParallelChunkWrapperDefs{
+			chunk_idx: 0
+			spawn:     ['spawn-0-typedef;', 'spawn-0-trampoline;', 'spawn-shared;']
+			callback:  ['callback-0;']
+		},
+	]
+
+	mut ordered := []string{len: 4}
+	mut ordered_wrapper_defs := []ParallelChunkWrapperDefs{len: 4}
+	g.merge_parallel_worker_ordered(high, mut ordered, mut ordered_wrapper_defs)
+	g.merge_parallel_worker_ordered(low, mut ordered, mut ordered_wrapper_defs)
+	g.replay_ordered_parallel_wrapper_defs(ordered_wrapper_defs)
+
+	assert ordered == ['chunk-0;', 'chunk-1;', 'chunk-2;', 'chunk-3;']
+	assert g.spawn_wrapper_defs == ['spawn-0-typedef;', 'spawn-0-trampoline;', 'spawn-shared;',
+		'spawn-1-typedef;', 'spawn-1-trampoline;', 'spawn-2-typedef;', 'spawn-2-trampoline;',
+		'spawn-3-typedef;', 'spawn-3-trampoline;']
+	assert g.callback_wrapper_defs == ['callback-0;', 'callback-1;', 'callback-2;', 'callback-3;']
+}
+
+fn test_dynamic_parallel_chunk_capture_keeps_deduplicated_wrapper_attempts() {
+	mut g, _ := parallel_worker_test_gen(true)
+	g.parallel_chunk_wrapper_defs << ParallelChunkWrapperDefs{
+		chunk_idx: 2
+	}
+	g.parallel_chunk_wrapper_capture = 0
+	g.add_spawn_wrapper_def('spawn-shared;')
+	g.add_spawn_wrapper_def('spawn-shared;')
+	g.add_callback_wrapper_def('callback-shared;')
+	g.add_callback_wrapper_def('callback-shared;')
+	g.parallel_chunk_wrapper_capture = -1
+
+	assert g.spawn_wrapper_defs == ['spawn-shared;']
+	assert g.callback_wrapper_defs == ['callback-shared;']
+	assert g.parallel_chunk_wrapper_defs[0].spawn == ['spawn-shared;', 'spawn-shared;']
+	assert g.parallel_chunk_wrapper_defs[0].callback == ['callback-shared;', 'callback-shared;']
+}

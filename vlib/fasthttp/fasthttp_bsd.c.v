@@ -24,7 +24,7 @@ fn C.listen(__fd i32, __n i32) i32
 fn C.perror(s &u8)
 fn C.close(fd i32) i32
 fn C.htons(__hostshort u16) u16
-fn C.fcntl(fd i32, cmd i32, arg i32) i32
+fn C.fcntl(fd i32, cmd i32, arg ...voidptr) i32
 fn C.signal(sig int, handler voidptr) voidptr
 
 const buf_size = max_connection_size
@@ -469,7 +469,7 @@ fn process_request(server &Server, kq int, c_ptr voidptr, mut clients map[int]vo
 	}
 	leave_request_arena_current_thread(c.request_arena)
 	if resp.file_path != '' {
-		fd := C.open(resp.file_path.str, C.O_RDONLY, 0)
+		fd := C.open(&char(resp.file_path.str), C.O_RDONLY, 0)
 		if fd != -1 {
 			mut st := C.stat{}
 			if C.fstat(fd, &st) == 0 {

@@ -409,6 +409,7 @@ pub struct Module {
 pub mut:
 	name       string
 	target     TargetData
+	track_uses bool = true
 	type_store TypeStore
 	values     []Value
 	instrs     []Instruction
@@ -422,6 +423,12 @@ pub mut:
 	c_typedef_structs map[int]bool
 	// Constant cache: "type:name" -> ValueID for deduplication.
 	const_cache map[string]ValueID
+mut:
+	// Layout queries are hot in both SSA construction and native codegen. Keep
+	// their scratch and completed sizes on the module instead of allocating two
+	// type-table-sized arrays for every query.
+	type_size_cache    []int
+	type_size_visiting []bool
 }
 
 // new creates a Module value for ssa.
@@ -437,6 +444,26 @@ pub fn Module.new() &Module {
 		id:   0
 	}
 	return m
+}
+
+// release_codegen_analysis_metadata drops SSA analysis data that direct backends do not read.
+// Keeping a use-list allocation for every value through large native self-host emission can
+// otherwise retain several gigabytes after the optimizer has finished.
+pub fn (mut m Module) release_codegen_analysis_metadata() {
+	unsafe {
+		for mut value in m.values {
+			value.uses.free()
+			value.uses = []ValueID{}
+		}
+		for mut block in m.blocks {
+			block.preds.free()
+			block.preds = []BlockID{}
+			block.succs.free()
+			block.succs = []BlockID{}
+			block.dom_tree.free()
+			block.dom_tree = []BlockID{}
+		}
+	}
 }
 
 // add_value updates add value state for Module.
@@ -465,14 +492,16 @@ pub fn (mut m Module) add_instr(op OpCode, block BlockID, typ TypeID, operands [
 	mut blk := m.blocks[block]
 	blk.instrs << val_id
 	m.blocks[block] = blk
-	for oi, op_id in m.instrs[instr_idx].operands {
-		if !m.instrs[instr_idx].is_value_operand(oi) {
-			continue
-		}
-		if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
-			mut op_val := m.values[op_id]
-			op_val.uses << val_id
-			m.values[op_id] = op_val
+	if m.track_uses {
+		for oi, op_id in m.instrs[instr_idx].operands {
+			if !m.instrs[instr_idx].is_value_operand(oi) {
+				continue
+			}
+			if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
+				mut op_val := m.values[op_id]
+				op_val.uses << val_id
+				m.values[op_id] = op_val
+			}
 		}
 	}
 	return val_id
@@ -492,14 +521,16 @@ pub fn (mut m Module) add_instr_front(op OpCode, block BlockID, typ TypeID, oper
 	mut blk := m.blocks[block]
 	blk.instrs.prepend(val_id)
 	m.blocks[block] = blk
-	for oi, op_id in m.instrs[instr_idx].operands {
-		if !m.instrs[instr_idx].is_value_operand(oi) {
-			continue
-		}
-		if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
-			mut op_val := m.values[op_id]
-			op_val.uses << val_id
-			m.values[op_id] = op_val
+	if m.track_uses {
+		for oi, op_id in m.instrs[instr_idx].operands {
+			if !m.instrs[instr_idx].is_value_operand(oi) {
+				continue
+			}
+			if op_id > 0 && op_id < m.values.len && val_id !in m.values[op_id].uses {
+				mut op_val := m.values[op_id]
+				op_val.uses << val_id
+				m.values[op_id] = op_val
+			}
 		}
 	}
 	return val_id
@@ -515,7 +546,7 @@ pub fn (mut m Module) append_phi_operands(phi_val_id ValueID, val ValueID, block
 	instr.operands << val
 	instr.operands << block_id
 	m.instrs[instr_idx] = instr
-	if val > 0 && val < m.values.len {
+	if m.track_uses && val > 0 && val < m.values.len {
 		if phi_val_id !in m.values[val].uses {
 			mut op_val := m.values[val]
 			op_val.uses << phi_val_id
@@ -731,9 +762,17 @@ pub fn (m &Module) get_block_from_val(val_id int) int {
 
 // type_size returns the byte size for an SSA type on the current target.
 pub fn (m &Module) type_size(typ_id TypeID) int {
-	mut visiting := []bool{len: m.type_store.types.len}
-	mut cache := []int{len: m.type_store.types.len}
-	return m.type_size_inner(typ_id, 0, mut visiting, mut cache)
+	mut mm := unsafe { &Module(voidptr(m)) }
+	mm.ensure_type_layout_cache()
+	return m.type_size_inner(typ_id, 0, mut mm.type_size_visiting, mut mm.type_size_cache)
+}
+
+fn (mut m Module) ensure_type_layout_cache() {
+	type_count := m.type_store.types.len
+	if m.type_size_cache.len < type_count {
+		m.type_size_cache << []int{len: type_count - m.type_size_cache.len}
+		m.type_size_visiting << []bool{len: type_count - m.type_size_visiting.len}
+	}
 }
 
 // type_size_inner returns type size inner data for Module.
@@ -929,9 +968,9 @@ pub fn (m &Module) struct_field_offset(typ_id TypeID, field_idx int) int {
 	if typ.is_union {
 		return 0
 	}
-	mut visiting := []bool{len: m.type_store.types.len}
-	mut cache := []int{len: m.type_store.types.len}
-	visiting[typ_id] = true
+	mut mm := unsafe { &Module(voidptr(m)) }
+	mm.ensure_type_layout_cache()
+	mm.type_size_visiting[typ_id] = true
 	mut offset := 0
 	for i in 0 .. field_idx {
 		if i >= typ.fields.len {
@@ -941,7 +980,8 @@ pub fn (m &Module) struct_field_offset(typ_id TypeID, field_idx int) int {
 		if align > 1 && offset % align != 0 {
 			offset = (offset + align - 1) & ~(align - 1)
 		}
-		offset += m.type_size_inner(typ.fields[i], 1, mut visiting, mut cache)
+		offset += m.type_size_inner(typ.fields[i], 1, mut mm.type_size_visiting, mut
+			mm.type_size_cache)
 	}
 	if field_idx < typ.fields.len {
 		align := m.type_align_for_layout(typ.fields[field_idx])
@@ -949,6 +989,7 @@ pub fn (m &Module) struct_field_offset(typ_id TypeID, field_idx int) int {
 			offset = (offset + align - 1) & ~(align - 1)
 		}
 	}
+	mm.type_size_visiting[typ_id] = false
 	return offset
 }
 
@@ -961,8 +1002,11 @@ pub fn (m &Module) struct_field_size(typ_id TypeID, field_idx int) int {
 	if typ.kind != .struct_t || field_idx < 0 || field_idx >= typ.fields.len {
 		return 0
 	}
-	mut visiting := []bool{len: m.type_store.types.len}
-	mut cache := []int{len: m.type_store.types.len}
-	visiting[typ_id] = true
-	return m.type_size_inner(typ.fields[field_idx], 1, mut visiting, mut cache)
+	mut mm := unsafe { &Module(voidptr(m)) }
+	mm.ensure_type_layout_cache()
+	mm.type_size_visiting[typ_id] = true
+	size := m.type_size_inner(typ.fields[field_idx], 1, mut mm.type_size_visiting, mut
+		mm.type_size_cache)
+	mm.type_size_visiting[typ_id] = false
+	return size
 }

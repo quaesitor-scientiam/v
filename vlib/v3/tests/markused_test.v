@@ -96,6 +96,31 @@ fn mark_used_source(name string, source string) map[string]bool {
 	return markused.mark_used(a, tc)
 }
 
+fn test_trivial_literal_output_prunes_conservative_runtime_helper_seeds() {
+	used := mark_used_source('trivial_literal_output', "println('Hello, World!')")
+	assert !used['__new_array']
+	assert !used['array.get']
+	assert !used['array.push']
+	assert !used['array.delete_last']
+	assert !used['i64.str']
+	assert !used['map.clone']
+	assert !used['strconv.format_uint']
+}
+
+fn test_nontrivial_output_keeps_conservative_runtime_helper_seeds() {
+	used := mark_used_source('nontrivial_output', "
+fn message() string {
+	return 'Hello, World!'
+}
+
+println(message())
+")
+	assert used['map.clone']
+	assert used['strconv.format_uint']
+	assert used['array.delete_last']
+	assert used['i64.str']
+}
+
 fn find_fn_node_id(a &flat.FlatAst, name string) int {
 	for i, node in a.nodes {
 		if node.kind == .fn_decl && node.value == name {
@@ -308,6 +333,55 @@ fn main() {
 	assert used['new_map']
 }
 
+fn test_self_typed_default_collects_explicit_initializer_calls() {
+	used := mark_used_source('self_typed_default_explicit_call', '
+interface Value {}
+
+struct End {}
+
+struct S {
+	inner Value = S{
+		inner: make()
+	}
+}
+
+fn make() Value {
+	return End{}
+}
+
+fn main() {
+	_ := S{}
+}
+')
+	assert used['make']
+}
+
+fn test_self_typed_default_collects_nested_omitted_default_calls() {
+	used := mark_used_source('self_typed_default_nested_omitted_call', '
+interface Value {}
+
+struct End {}
+
+struct S {
+	inner Value = S{
+		inner: End{}
+	}
+	token int = make()
+}
+
+fn make() int {
+	return 7
+}
+
+fn main() {
+	_ := S{
+		token: 1
+	}
+}
+')
+	assert used['make']
+}
+
 // test_string_membership_seeds_contains_runtime_helpers validates this v3 regression case.
 fn test_string_membership_seeds_contains_runtime_helpers() {
 	used := mark_used_source('string_membership_contains', '
@@ -363,7 +437,7 @@ fn main() {
 	assert used['string__plus']
 }
 
-fn test_implicit_interface_str_dispatch_seeds_generated_helpers() {
+fn test_implicit_interface_str_dispatch_seeds_array_helpers() {
 	source := '
 interface Printable {
 	str() string
@@ -379,11 +453,10 @@ fn main() {
 	}).str())
 }
 '
-	mut a, mut tc := parse_checked_source('implicit_interface_str_dispatch_helpers', source)
+	mut a, mut tc := parse_checked_source('implicit_interface_str_dispatch_array_helpers', source)
 	mut used := markused.mark_used(a, tc)
 	assert used['string__plus']
 	assert used['array.get']
-	assert used['array__get']
 	assert used['int__str']
 	used = transform.transform_with_used(mut a, tc, used)
 	tc.diagnose_unknown_calls = false
@@ -391,7 +464,7 @@ fn main() {
 	tc.annotate_types()
 	mut g := cgen.FlatGen.new()
 	c_code := g.gen_with_used_options(a, used, tc, true)
-	assert c_code.contains('array_get('), c_code
+	assert c_code.contains('_iface_str_arr_'), c_code
 }
 
 fn test_implicit_interface_str_dispatch_seeds_optional_payload_helpers() {

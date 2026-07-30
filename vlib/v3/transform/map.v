@@ -52,6 +52,36 @@ fn (t &Transformer) map_key_backing_type(key_type string) ?string {
 			}
 		}
 	}
+	// A bare alias spelling from a foreign-module expansion (auto-stringified
+	// fields keep their declaring module's spelling): resolve it through the
+	// checker alias table like wrap_string_conversion does, and store keys as
+	// the scalar base so the declared C type never names the unresolvable
+	// alias. The transform's own struct mirror holds first-wins bare aliases
+	// for unrelated modules, so only a checker-declared struct blocks this.
+	if !isnil(t.tc) && !clean.contains('.') && clean !in t.tc.structs {
+		mut alias_target := t.tc.type_aliases[clean] or { '' }
+		if alias_target.len == 0 {
+			suffix := '.${clean}'
+			mut matches := 0
+			for aname, target in t.tc.type_aliases {
+				if aname.ends_with(suffix) {
+					alias_target = target
+					matches++
+					if matches > 1 {
+						alias_target = ''
+						break
+					}
+				}
+			}
+		}
+		if alias_target.len > 0 {
+			base := t.normalize_type_alias(alias_target).trim_space()
+			if base in ['int', 'i8', 'i16', 'i32', 'i64', 'isize', 'usize', 'u8', 'byte', 'u16',
+				'u32', 'u64', 'rune', 'char', 'string'] {
+				return base
+			}
+		}
+	}
 	return none
 }
 
@@ -92,11 +122,14 @@ fn map_callback_names(key_type string) (string, string, string, string) {
 	if key_type == 'string' {
 		return 'map_hash_string', 'map_eq_string', 'map_clone_string', 'map_free_string'
 	}
-	size_suffix := match key_type {
-		'u8', 'i8', 'bool', 'char' { '1' }
-		'u16', 'i16' { '2' }
-		'i64', 'u64', 'isize', 'usize', 'f64', 'voidptr' { '8' }
-		else { '4' }
+	mut size_suffix := '4'
+	if key_type in ['u8', 'i8', 'bool', 'char'] {
+		size_suffix = '1'
+	} else if key_type in ['u16', 'i16'] {
+		size_suffix = '2'
+	} else if key_type in ['i64', 'u64', 'isize', 'usize', 'f64', 'voidptr']
+		|| key_type.contains('Arc[') || key_type.contains('Arc_') {
+		size_suffix = '8'
 	}
 
 	return 'map_hash_int_${size_suffix}', 'map_eq_int_${size_suffix}', 'map_clone_int_${size_suffix}', 'map_free_nop'
@@ -145,7 +178,7 @@ fn (mut t Transformer) map_index_info(index_id flat.NodeId) ?MapIndexInfo {
 
 // make_map_get_expr builds make map get expr data for transform.
 fn (mut t Transformer) make_map_get_expr(map_expr flat.NodeId, base_type string, key_name string, zero_name string, value_type string) flat.NodeId {
-	fixed_value_type := fixed_array_map_value_type_text(value_type)
+	fixed_value_type := t.fixed_array_map_value_type_text(value_type)
 	effective_value_type := if fixed_value_type.len > 0 { fixed_value_type } else { value_type }
 	clean_value_type := if t.is_fixed_array_type(effective_value_type) {
 		if t.fixed_array_type_contains_map(effective_value_type) {
@@ -589,7 +622,7 @@ fn (t &Transformer) map_optional_value_base_type(typ string) string {
 }
 
 // try_lower_map_index_assign supports try lower map index assign handling for Transformer.
-fn (mut t Transformer) try_lower_map_index_assign(node flat.Node) ?[]flat.NodeId {
+fn (mut t Transformer) try_lower_map_index_assign(id flat.NodeId, node flat.Node) ?[]flat.NodeId {
 	if node.kind !in [.assign, .index_assign] || node.children_count < 2 {
 		return none
 	}
@@ -637,6 +670,9 @@ fn (mut t Transformer) try_lower_map_index_assign(node flat.Node) ?[]flat.NodeId
 		t.append_map_value_drop_before_set(map_expr, info.base_type, key_name, info.value_type, mut
 			result)
 		result << t.make_map_set_stmt(map_expr, info.base_type, key_name, value_name)
+		if int(id) in t.local_closure_field_cleanups {
+			result << t.make_local_closure_cleanup_defer(value_name)
+		}
 		t.append_owned_map_set_key_cleanup(key_name, cleanup_key, existing_key_name, mut result)
 		return result
 	}
@@ -1048,6 +1084,7 @@ fn map_compound_to_infix_op(op flat.Op) ?flat.Op {
 		.plus_assign { return flat.Op.plus }
 		.minus_assign { return flat.Op.minus }
 		.mul_assign { return flat.Op.mul }
+		.power_assign { return flat.Op.power }
 		.div_assign { return flat.Op.div }
 		.mod_assign { return flat.Op.mod }
 		.amp_assign { return flat.Op.amp }
@@ -1204,10 +1241,11 @@ fn (mut t Transformer) try_lower_map_index_append_stmt_with_prelude(id flat.Node
 	return result
 }
 
-fn fixed_array_map_value_type_text(value_type string) string {
+fn (t &Transformer) fixed_array_map_value_type_text(value_type string) string {
 	if value_type.starts_with('map[') {
 		elem, dims := transform_postfix_fixed_array_parts(value_type)
-		if dims.len > 0 {
+		if dims.len > 0 && (is_decimal_text(dims[0]) || (!isnil(t.tc)
+			&& t.tc.const_int_value_in_module(dims[0], t.cur_module, []string{}) != none)) {
 			return '[${dims[0]}]${elem}'
 		}
 		return ''
@@ -1332,6 +1370,9 @@ fn (mut t Transformer) lower_map_init_to_runtime(id flat.NodeId, node flat.Node)
 		call := t.make_call_typed('map__set', arr3(t.make_prefix(.amp, t.make_ident(tmp_name)), t.make_prefix(.amp,
 			t.make_ident(key_name)), t.make_prefix(.amp, t.make_ident(value_name))), 'void')
 		t.pending_stmts << t.make_expr_stmt(call)
+		if int(value_id) in t.local_closure_field_cleanups {
+			t.pending_stmts << t.make_local_closure_cleanup_defer(value_name)
+		}
 		if needs_entry_cleanup {
 			mut cleanup_stmts := []flat.NodeId{}
 			t.append_owned_map_set_key_cleanup(key_name, cleanup_key, existing_key_name, mut

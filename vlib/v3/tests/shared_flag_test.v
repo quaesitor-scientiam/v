@@ -9,7 +9,7 @@ const shared_flag_v3_src = os.join_path(shared_flag_v3_dir, 'v3.v')
 fn test_shared_flag_builds_no_main_module() {
 	v3_bin := os.join_path(os.temp_dir(), 'v3_shared_flag_test_${os.getpid()}')
 	build :=
-		os.execute('${os.quoted_path(shared_flag_vexe)} -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
+		os.execute('${os.quoted_path(shared_flag_vexe)} -gc none -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
 	assert build.exit_code == 0, build.output
 
 	tmp_dir := os.join_path(os.temp_dir(), 'v3_shared_flag_module_${os.getpid()}')
@@ -49,7 +49,7 @@ fn test_shared_flag_builds_object_dependencies_as_pic() {
 	pid := os.getpid()
 	v3_bin := os.join_path(os.temp_dir(), 'v3_shared_flag_pic_test_${pid}')
 	build :=
-		os.execute('${os.quoted_path(shared_flag_vexe)} -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
+		os.execute('${os.quoted_path(shared_flag_vexe)} -gc none -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
 	assert build.exit_code == 0, build.output
 
 	tmp_dir := os.join_path(os.temp_dir(), 'v3_shared_flag_pic_${pid}')
@@ -112,7 +112,13 @@ pub fn answer() int {
 	assert compile_shared.exit_code == 0, compile_shared.output
 	assert compile_shared.output.contains('-fPIC'), compile_shared.output
 	cached_after_shared := shared_flag_cached_objects(obj_path)
-	assert cached_after_shared.len == 2, '${compile_shared.output}\n${cached_after_shared}'
+	$if macos {
+		// Cached development executables already link through a PIC dylib on macOS,
+		// so the normal and shared builds can reuse the same dependency object.
+		assert cached_after_shared.len == 1, '${compile_shared.output}\n${cached_after_shared}'
+	} $else {
+		assert cached_after_shared.len == 2, '${compile_shared.output}\n${cached_after_shared}'
+	}
 	assert os.exists(out_path)
 	assert os.file_size(out_path) > 0
 }
@@ -124,7 +130,7 @@ fn test_relative_c_object_cache_rebuilds_when_header_changes() {
 	pid := os.getpid()
 	v3_bin := os.join_path(os.temp_dir(), 'v3_c_object_header_test_${pid}')
 	build :=
-		os.execute('${os.quoted_path(shared_flag_vexe)} -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
+		os.execute('${os.quoted_path(shared_flag_vexe)} -gc none -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
 	assert build.exit_code == 0, build.output
 
 	project_dir := os.join_path(os.temp_dir(), 'v3_c_object_header_${pid}')
@@ -187,7 +193,7 @@ fn test_relative_c_object_caches_use_resolved_source_path() {
 	pid := os.getpid()
 	v3_bin := os.join_path(os.temp_dir(), 'v3_c_object_path_test_${pid}')
 	build :=
-		os.execute('${os.quoted_path(shared_flag_vexe)} -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
+		os.execute('${os.quoted_path(shared_flag_vexe)} -gc none -o ${os.quoted_path(v3_bin)} ${os.quoted_path(shared_flag_v3_src)}')
 	assert build.exit_code == 0, build.output
 
 	root := os.join_path(os.temp_dir(), 'v3_c_object_path_${pid}')
@@ -235,6 +241,8 @@ fn main() {
 	first_run := os.execute(os.quoted_path(first_bin))
 	assert first_run.exit_code == 0, first_run.output
 	assert first_run.output.trim_space() == '41'
+	first_cached_objects := shared_flag_cached_objects(first_object)
+	assert first_cached_objects.len == 1, first_cached_objects.str()
 
 	second_bin := os.join_path(second_project, 'out')
 	second_compile :=
@@ -243,9 +251,8 @@ fn main() {
 	second_run := os.execute(os.quoted_path(second_bin))
 	assert second_run.exit_code == 0, second_run.output
 	assert second_run.output.trim_space() == '42'
-	first_cached_objects := shared_flag_cached_objects(first_object)
-	second_cached_objects := shared_flag_cached_objects(second_object)
-	assert first_cached_objects.len == 1, first_cached_objects.str()
+	second_cached_objects :=
+		shared_flag_cached_objects(second_object).filter(it != first_cached_objects[0])
 	assert second_cached_objects.len == 1, second_cached_objects.str()
 	assert first_cached_objects[0] != second_cached_objects[0]
 }

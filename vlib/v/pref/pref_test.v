@@ -31,6 +31,7 @@ fn test_version_flag() {
 	v_verbose_cmd_res := os.execute_opt('${vexe} -v run ${example_path}')!.output
 	assert v_verbose_cmd_res != v_ver_cmd_res
 	assert v_verbose_cmd_res.contains('v.pref.lookup_path:')
+		|| v_verbose_cmd_res.contains('Running macOS V3 compiler in process:')
 
 	v_verbose_cmd_with_additional_args_res := os.execute_opt('${vexe} -g -v run ${example_path}')!.output
 	assert v_verbose_cmd_with_additional_args_res != v_ver_cmd_res
@@ -254,6 +255,46 @@ fn test_explicit_gc_mode_is_forwarded_to_build_module() {
 	}
 }
 
+fn issue74_cache_path_for_ldflags(ldflags string) (string, pref.PkgConfigMode) {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	mut args := ['-cc', 'gcc']
+	if ldflags != '' {
+		args << ['-ldflags', ldflags]
+	}
+	args << target
+	mut prefs, _ := pref.parse_args_and_show_errors([], args, false)
+	path := prefs.cache_manager.mod_postfix_with_key2cpath('issue74-cache-salt', '.o',
+		'same-source')
+	return path, prefs.pkgconfig_mode
+}
+
+fn test_pkgconfig_mode_salts_cache_without_salt_for_all_ldflags() {
+	cache_root := os.join_path(os.vtmp_dir(), 'issue74_pkgconfig_mode_cache_${os.getpid()}')
+	old_cache := os.getenv_opt('VCACHE')
+	os.setenv('VCACHE', cache_root, true)
+	defer {
+		if cache := old_cache {
+			os.setenv('VCACHE', cache, true)
+		} else {
+			os.unsetenv('VCACHE')
+		}
+		os.rmdir_all(cache_root) or {}
+	}
+
+	dynamic_path, dynamic_mode := issue74_cache_path_for_ldflags('')
+	dynamic_link_path, dynamic_link_mode := issue74_cache_path_for_ldflags('-Wl,--as-needed')
+	static_path, static_mode := issue74_cache_path_for_ldflags('-static')
+	static_link_path, static_link_mode := issue74_cache_path_for_ldflags('-static -Wl,--as-needed')
+
+	assert dynamic_mode == .dynamic
+	assert dynamic_link_mode == .dynamic
+	assert static_mode == .static_
+	assert static_link_mode == .static_
+	assert dynamic_path == dynamic_link_path
+	assert static_path == static_link_path
+	assert dynamic_path != static_path
+}
+
 fn test_v_compiler_targets_default_to_no_gc() {
 	for target in [
 		os.join_path(vroot, 'cmd', 'v'),
@@ -446,6 +487,32 @@ fn test_m32_does_not_override_explicit_arch() {
 	assert !prefs.m64
 	assert prefs.arch == .amd64
 	assert prefs.build_options.contains('-m32')
+}
+
+fn test_v3_memory_limit_passthrough_flags_are_accepted() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	for flag in ['-no-memory-limit', '--no-memory-limit'] {
+		prefs, command := pref.parse_args_and_show_errors([], [flag, target], false)
+		assert command == target
+		assert flag !in prefs.build_options
+	}
+}
+
+fn test_old_compiler_flag_is_accepted() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, command := pref.parse_args_and_show_errors([], ['-old-compiler', target], false)
+	assert command == target
+	assert prefs.old_compiler
+	assert '-old-compiler' !in prefs.build_options
+}
+
+fn test_compact_boolean_define_is_accepted() {
+	target := os.join_path(vroot, 'examples', 'hello_world.v')
+	prefs, command := pref.parse_args_and_show_errors([], ['-dfeature', target], false)
+	assert command == target
+	assert prefs.compile_values['feature'] == 'true'
+	assert 'feature' in prefs.compile_defines
+	assert prefs.build_options.contains('-d feature')
 }
 
 fn test_v_cmds_and_flags() {

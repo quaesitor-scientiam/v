@@ -24,6 +24,58 @@ fn span_text(src string, node flat.Node) string {
 	return src[node.pos.offset..node.pos.end]
 }
 
+fn test_statement_map_literals_accept_compound_keys() {
+	ast, _ := parse_span_source('statement_map_compound_keys', "fn make_key() string {
+	return 'key'
+}
+
+fn main() {
+	{make_key(): 1}
+	{('key'): 2}
+	{
+		make_key(): 3
+	}
+}
+")
+	map_inits := ast.nodes.filter(it.kind == .map_init)
+	assert map_inits.len == 3
+	assert map_inits.all(it.children_count == 2)
+}
+
+fn test_standalone_block_preserves_leading_label() {
+	ast, _ := parse_span_source('standalone_block_label', "fn main() {
+	{
+		retry: println('x')
+	}
+}
+")
+	labels := ast.nodes.filter(it.kind == .label_stmt)
+	assert labels.len == 1
+	assert labels[0].value == 'retry'
+	assert ast.nodes.all(it.kind != .map_init)
+}
+
+fn test_supported_unix_comptime_aliases_have_no_diagnostics() {
+	path := os.join_path(os.temp_dir(), 'v3_comptime_unix_aliases_${os.getpid()}.v')
+	os.write_file(path, "fn main() {
+	\$if unix {
+		println('unix')
+	}
+	\$if posix {
+		println('posix')
+	}
+}
+") or {
+		panic(err)
+	}
+	defer {
+		os.rm(path) or {}
+	}
+	mut p := Parser.new(pref.new_preferences())
+	p.parse_file(path)
+	assert p.diagnostics.len == 0, p.diagnostics.str()
+}
+
 // Literal nodes must carry their own span, not the span of the token that
 // happens to follow them after p.next().
 fn test_literal_nodes_span_their_own_source() {
@@ -125,6 +177,20 @@ fn test_array_cast_spans_from_bracket() {
 	assert '[]int(p)' in spans
 }
 
+fn test_mut_channel_element_type_is_preserved() {
+	ast, _ := parse_span_source('mut_channel', 'struct Item {}
+fn consume(chs []chan mut Item) {}
+')
+	mut found := false
+	for node in ast.nodes {
+		if node.kind == .param && node.value == 'chs' {
+			found = true
+			assert node.typ == '[]chan mut Item'
+		}
+	}
+	assert found
+}
+
 // Dynamic array initializers (`[]T{...}`) are parsed after the `[]T` prefix is
 // consumed, so the array_init node must span from the opening `[`, not the `{`.
 fn test_dynamic_array_init_spans_from_bracket() {
@@ -172,6 +238,49 @@ fn main() {
 	assert 'foo(1, 2)' in call_spans
 	assert 'o.missing(1, 2)' in call_spans
 	assert 'o.missing' in selector_spans
+}
+
+fn test_keyword_identifiers_keep_declaration_names_and_spans() {
+	ast, src := parse_span_source('keyword_ident', 'fn info(type int) int {
+	return type
+}
+fn main() {
+	type := 3
+	for type in [1, 2] {
+		println(type)
+	}
+	println(type)
+}
+')
+	mut saw_param := false
+	mut saw_decl := false
+	mut saw_loop := false
+	mut type_ident_count := 0
+	for node in ast.nodes {
+		if node.kind == .param && node.value == 'type' && node.typ == 'int' {
+			saw_param = true
+		}
+		if node.kind == .ident && node.value == 'type' {
+			type_ident_count++
+			assert span_text(src, node) == 'type'
+		}
+		if node.kind == .decl_assign && node.children_count >= 2 {
+			lhs := ast.nodes[int(ast.children[int(node.children_start)])]
+			if lhs.kind == .ident && lhs.value == 'type' {
+				saw_decl = true
+			}
+		}
+		if node.kind == .for_in_stmt && node.children_count >= 3 {
+			key := ast.nodes[int(ast.children[int(node.children_start)])]
+			if key.kind == .ident && key.value == 'type' {
+				saw_loop = true
+			}
+		}
+	}
+	assert saw_param
+	assert saw_decl
+	assert saw_loop
+	assert type_ident_count >= 5
 }
 
 // Address-of expressions (`&Foo{}`, `&[]T{}`, `&T(x)`) span from the `&` through
@@ -360,4 +469,200 @@ fn test_lambda_nodes_have_valid_spans() {
 		}
 	}
 	assert saw_lambda
+}
+
+// `$match` is valid in expression position. It must consume every branch before
+// the enclosing declaration continues, otherwise later patterns are parsed as
+// stray function-body statements and the real `return` is lost.
+fn test_comptime_match_expression_consumes_all_branches() {
+	ast, _ := parse_span_source('comptime_match_expr', 'fn choose[T]() int {
+	value := \$match T.unaliased_typ {
+		int { 1 }
+		\$float { 2 }
+		\$else { 3 }
+	}
+	return value
+}
+')
+	mut saw := false
+	for node in ast.nodes {
+		if node.kind != .fn_decl || node.value != 'choose' {
+			continue
+		}
+		saw = true
+		assert node.children_count == 2
+		decl := ast.child_node(&node, 0)
+		ret := ast.child_node(&node, 1)
+		assert decl.kind == .decl_assign
+		assert ret.kind == .return_stmt
+		assert decl.children_count == 2
+		rhs := ast.child_node(decl, 1)
+		assert rhs.kind == .comptime_if
+	}
+	assert saw
+}
+
+fn test_comptime_type_accessor_initializers_stay_single_expressions() {
+	ast, _ := parse_span_source('comptime_type_init', 'struct Box[T] {}
+
+fn make_zero[T](x ?T) {
+	_ := typeof(x).payload_type{}
+	_ := \$zero([]typeof(x).payload_type{})
+	_ := \$zero([][]int{})
+	_ := \$zero([]?int{})
+	_ := \$zero([]Box[int]{})
+	_ := \$new([]Box[string]{})
+}
+')
+	mut saw_fn := false
+	mut marker_count := 0
+	mut new_marker_count := 0
+	mut saw_array_target := false
+	mut saw_accessor_array_target := false
+	mut saw_nested_array_target := false
+	mut saw_optional_array_target := false
+	mut saw_generic_array_target := false
+	mut saw_generic_new_array_target := false
+	for node in ast.nodes {
+		if node.kind == .fn_decl && node.value == 'make_zero' {
+			saw_fn = true
+			assert node.children_count == 7
+			assert ast.child_node(&node, 0).kind == .param
+			assert ast.child_node(&node, 1).kind == .decl_assign
+			assert ast.child_node(&node, 2).kind == .decl_assign
+		}
+		if node.kind == .string_literal && node.value in ['__v3_comptime_zero', '__v3_comptime_new']
+			&& node.children_count == 1 {
+			if node.value == '__v3_comptime_zero' {
+				marker_count++
+			} else {
+				new_marker_count++
+			}
+			target := ast.child_node(&node, 0)
+			if target.kind == .array_init && target.value == '__v3_comptime_type_array' {
+				saw_array_target = true
+				if target.children_count == 1 {
+					elem := ast.child_node(target, 0)
+					if elem.kind == .selector && elem.value == 'payload_type' {
+						saw_accessor_array_target = true
+					}
+					if elem.kind == .array_init && elem.value == '__v3_comptime_type_array' {
+						saw_nested_array_target = true
+						assert elem.children_count == 1
+						leaf := ast.child_node(elem, 0)
+						assert leaf.kind == .ident
+						assert leaf.value == 'int'
+					}
+					if elem.kind == .ident && elem.value == '?int' {
+						saw_optional_array_target = true
+					}
+					if elem.kind == .ident && elem.value == 'Box[int]' {
+						saw_generic_array_target = true
+					}
+					if elem.kind == .ident && elem.value == 'Box[string]'
+						&& node.value == '__v3_comptime_new' {
+						saw_generic_new_array_target = true
+					}
+				}
+			}
+		}
+	}
+	assert saw_fn
+	assert marker_count == 5
+	assert new_marker_count == 1
+	assert saw_array_target
+	assert saw_accessor_array_target
+	assert saw_nested_array_target
+	assert saw_optional_array_target
+	assert saw_generic_array_target
+	assert saw_generic_new_array_target
+}
+
+fn test_comptime_fixed_array_targets_stay_type_nodes() {
+	ast, _ := parse_span_source('comptime_fixed_array_type_arg', 'struct Box[T] {}
+
+fn main() {
+	_ := \$zero([2]int{})
+	_ := \$new([3]Box[int]{})
+}
+')
+	mut saw_zero := false
+	mut saw_new := false
+	for node in ast.nodes {
+		if node.kind != .string_literal || node.children_count != 1 {
+			continue
+		}
+		target := ast.child_node(&node, 0)
+		if node.value == '__v3_comptime_zero' && target.kind == .ident && target.value == '[2]int' {
+			saw_zero = true
+		}
+		if node.value == '__v3_comptime_new' && target.kind == .ident
+			&& target.value == '[3]Box[int]' {
+			saw_new = true
+		}
+	}
+	assert saw_zero
+	assert saw_new
+}
+
+fn test_comptime_map_and_generic_targets_stay_type_nodes() {
+	ast, _ := parse_span_source('comptime_map_generic_type_arg', 'struct Box[T] {}
+
+fn main() {
+	_ := \$zero(map[string]int{})
+	_ := \$new(Box[int]{})
+}
+')
+	mut saw_map := false
+	mut saw_generic := false
+	for node in ast.nodes {
+		if node.kind != .string_literal || node.children_count != 1 {
+			continue
+		}
+		target := ast.child_node(&node, 0)
+		if node.value == '__v3_comptime_zero' && target.kind == .ident
+			&& target.value == 'map[string]int' {
+			saw_map = true
+		}
+		if node.value == '__v3_comptime_new' && target.kind == .ident && target.value == 'Box[int]' {
+			saw_generic = true
+		}
+	}
+	assert saw_map
+	assert saw_generic
+}
+
+// The local-binding scope powers template-closure callee classification: a bare callee is
+// captured only when it names an in-scope local binding, never a module/top-level function.
+fn test_local_binding_scopes_track_shadowing_and_nesting() {
+	mut p := Parser.new(pref.new_preferences())
+	assert !p.is_local_binding('render')
+	// declare_local_binding is a no-op until a scope is open.
+	p.declare_local_binding('render')
+	assert !p.is_local_binding('render')
+
+	p.begin_local_binding_scope()
+	p.declare_local_binding('render')
+	p.declare_local_binding('row')
+	assert p.is_local_binding('render')
+	assert p.is_local_binding('row')
+	// A module/top-level function name is never an in-scope binding.
+	assert !p.is_local_binding('helper')
+	// `_` and empty names are not bindings.
+	p.declare_local_binding('_')
+	assert !p.is_local_binding('_')
+
+	// A nested scope's bindings disappear when it closes; the outer binding survives.
+	p.begin_local_binding_scope()
+	p.declare_local_binding('render')
+	p.declare_local_binding('inner')
+	assert p.is_local_binding('render')
+	assert p.is_local_binding('inner')
+	p.end_local_binding_scope()
+	assert p.is_local_binding('render')
+	assert !p.is_local_binding('inner')
+
+	p.end_local_binding_scope()
+	assert !p.is_local_binding('render')
+	assert !p.is_local_binding('row')
 }

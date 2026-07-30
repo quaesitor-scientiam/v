@@ -287,15 +287,20 @@ fn (mut t Transformer) expand_map_index_if_guard(node flat.Node, lhs_name string
 
 	ptr_ident := t.make_ident(ptr_name)
 	found_cond := t.make_infix(.ne, ptr_ident, t.a.add(.nil_literal))
-	ptr_value := t.make_prefix(.mul, t.make_cast('&${info.value_type}', t.make_ident(ptr_name),
-		'&${info.value_type}'))
-	value_decl := t.make_decl_assign_typed(lhs_name, ptr_value, info.value_type)
 
 	then_id := t.a.child(&node, 1)
 	then_node := t.a.nodes[int(then_id)]
-	t.set_var_type(lhs_name, info.value_type)
 	mut then_children := []flat.NodeId{}
-	then_children << value_decl
+	// A discarded binding (`if _ := m[k]`) only tests key presence; the value is
+	// never read, so skip the value dereference. That deref would otherwise cast to
+	// `&${info.value_type}` and, when the value type is unresolved, emit an invalid
+	// `void __discard = *(void*)ptr`.
+	if lhs_name != '_' {
+		ptr_value := t.make_prefix(.mul, t.make_cast('&${info.value_type}', t.make_ident(ptr_name),
+			'&${info.value_type}'))
+		t.set_var_type(lhs_name, info.value_type)
+		then_children << t.make_decl_assign_typed(lhs_name, ptr_value, info.value_type)
+	}
 	if then_node.kind == .block {
 		then_children << t.transform_stmts(t.a.children_of(&then_node))
 	} else {
@@ -968,15 +973,39 @@ fn (mut t Transformer) build_if_value_guard_chain(if_node flat.Node, target_name
 	t.drain_pending(mut result)
 	result << t.make_decl_assign_typed(tmp_name, rhs_expr, rhs_type)
 	ok_cond := t.make_selector(t.make_ident(tmp_name), 'ok', 'bool')
-	value_decl := t.make_decl_assign_typed(lhs.value, t.make_selector(t.make_ident(tmp_name),
-		'value', value_type), value_type)
-
+	// An if-guard condition stores the call at child 1 and any extra
+	// destructured names after it: [lhs0, rhs, lhs1, lhs2, ...].
+	mut lhs_ids := [lhs_id]
+	for i in 2 .. cond.children_count {
+		lhs_ids << t.a.child(&cond, i)
+	}
 	saved_var_types := t.var_types.clone()
-	t.set_var_type(lhs.value, value_type)
+	mut value_decls := []flat.NodeId{}
+	if lhs_ids.len > 1 {
+		if rhs_types := t.multi_return_types_for_expr(rhs_id, lhs_ids.len) {
+			for i, lhs_item_id in lhs_ids {
+				lhs_item := t.a.nodes[int(lhs_item_id)]
+				if lhs_item.kind != .ident || lhs_item.value == '_' {
+					continue
+				}
+				field_type := rhs_types[i].name()
+				payload := t.make_selector(t.make_ident(tmp_name), 'value', value_type)
+				field := t.make_selector(payload, 'arg${i}', field_type)
+				value_decls << t.make_decl_assign_typed(lhs_item.value, field, field_type)
+				t.set_var_type(lhs_item.value, field_type)
+			}
+		}
+	}
+	if value_decls.len == 0 {
+		value_decls << t.make_decl_assign_typed(lhs.value, t.make_selector(t.make_ident(tmp_name),
+			'value', value_type), value_type)
+		t.set_var_type(lhs.value, value_type)
+	}
 	then_id := t.a.child(&if_node, 1)
 	then_block0 := t.if_value_branch_block(then_id, target_name, target_type)
-	mut then_children := []flat.NodeId{cap: int(t.a.nodes[int(then_block0)].children_count) + 1}
-	then_children << value_decl
+	mut then_children := []flat.NodeId{cap: int(t.a.nodes[int(then_block0)].children_count) +
+		value_decls.len}
+	then_children << value_decls
 	then_children << t.a.children_of(&t.a.nodes[int(then_block0)])
 	then_block := t.make_block_prefix_scope_drops(then_children)
 	t.restore_var_types(saved_var_types)
@@ -1616,6 +1645,17 @@ fn (t &Transformer) post_if_exit_smartcasts(id flat.NodeId) []IsExprInfo {
 		}
 	}
 	return []IsExprInfo{}
+}
+
+fn (t &Transformer) post_assert_smartcasts(id flat.NodeId) []IsExprInfo {
+	if int(id) < 0 {
+		return []IsExprInfo{}
+	}
+	node := t.a.nodes[int(id)]
+	if node.kind != .assert_stmt || node.children_count == 0 {
+		return []IsExprInfo{}
+	}
+	return t.extract_all_is_exprs(t.a.child(&node, 0))
 }
 
 fn (t &Transformer) negated_is_expr_info(cond_id flat.NodeId) ?IsExprInfo {

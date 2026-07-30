@@ -1,6 +1,7 @@
 module transform
 
 import v3.flat
+import v3.token
 import v3.types
 
 fn test_deferred_worker_node_clone_preserves_skip_ownership_drops() {
@@ -67,4 +68,52 @@ fn test_merge_worker_shifts_private_specialization_metadata() {
 	assert int(worker_id) !in master.a.specialized_fn_nodes
 	assert master.a.specialized_fn_modules[int(base_id)] == 'base_module'
 	assert master.a.specialized_fn_files[int(base_id)] == 'base.v'
+}
+
+fn test_transform_ast_clone_preserves_template_metadata() {
+	mut a := flat.FlatAst.new()
+	a.template_call_sites[7] = token.new_pos(3, 11)
+	a.template_actions[7] = 'render_page'
+	mut tc := types.TypeChecker.new(&a)
+	master := new_transformer(mut a, &tc, map[string]bool{})
+	worker_ast := master.clone_ast_base(master.a.nodes.len, master.a.children.len)
+	assert worker_ast.template_call_sites[7] == master.a.template_call_sites[7]
+	assert worker_ast.template_actions[7] == 'render_page'
+}
+
+fn test_skipped_literal_decl_does_not_hide_later_closure() {
+	mut a := flat.FlatAst.new()
+	a.add_node(flat.Node{
+		kind: .fn_literal
+	})
+	a.add_node(flat.Node{
+		kind:  .fn_decl
+		value: 'dead'
+	})
+	a.add_node(flat.Node{
+		kind: .fn_literal
+	})
+	main_idx := int(a.add_node(flat.Node{
+		kind:  .fn_decl
+		value: 'main'
+	}))
+	helper_idx := int(a.add_node(flat.Node{
+		kind:  .fn_decl
+		value: 'helper'
+	}))
+	mut tc := types.TypeChecker.new(&a)
+	mut t := new_transformer(mut a, &tc, {
+		'main':   true
+		'helper': true
+	})
+	t.skip_generics = true
+	t.transformed_fns = []bool{len: t.a.nodes.len}
+
+	literal_decls := t.collect_literal_fn_decls(t.a.nodes.len)
+	assert literal_decls == [1, main_idx]
+	pure := t.transform_serial_then_collect_pure(literal_decls)
+	assert t.transformed_fns[main_idx]
+	assert !t.transformed_fns[helper_idx]
+	assert pure.len == 1
+	assert pure[0].fn_idx == helper_idx
 }

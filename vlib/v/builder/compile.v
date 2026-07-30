@@ -15,7 +15,27 @@ pub fn should_find_windows_host_c_compiler(pref_ &pref.Preferences) bool {
 	return pref_.backend == .c && pref_.os == .windows && !pref_.output_cross_c
 }
 
+fn resolve_ccompiler_type_and_pkgconfig_mode(mut prefs pref.Preferences) {
+	prefs.ccompiler_type = resolve_ccompiler_type(prefs.ccompiler, prefs.ccompiler_type)
+	prefs.resolve_pkgconfig_mode()
+}
+
 pub fn compile(command string, pref_ &pref.Preferences, backend_cb FnBackend) {
+	compile_with_optional_external_c_error_report(pref_, backend_cb, none)
+}
+
+// compile_with_external_c_error_report compiles with the established compiler and submits
+// `report` only after that build succeeds.
+pub fn compile_with_external_c_error_report(command string, pref_ &pref.Preferences, backend_cb FnBackend, report ExternalCErrorBugReport) {
+	compile_with_optional_external_c_error_report(pref_, backend_cb, report)
+}
+
+fn compile_with_optional_external_c_error_report(pref_ &pref.Preferences, backend_cb FnBackend, report ?ExternalCErrorBugReport) {
+	if failed := report {
+		// The compatibility compiler may exit from any validation, parser, checker, or
+		// C compilation path below. Register cleanup before entering those paths.
+		register_external_c_error_report_cleanup(failed.cleanup_dir)
+	}
 	if pref_.is_test {
 		disable_c_error_bug_reports()
 	}
@@ -31,11 +51,16 @@ pub fn compile(command string, pref_ &pref.Preferences, backend_cb FnBackend) {
 		}
 	}
 	mut pref_ref := unsafe { pref_ }
-	pref_ref.ccompiler_type = resolve_ccompiler_type(pref_ref.ccompiler, pref_ref.ccompiler_type)
+	resolve_ccompiler_type_and_pkgconfig_mode(mut pref_ref)
 	// Construct the V object from command line arguments
 	mut b := new_builder(pref_)
 	if b.should_rebuild() {
 		b.rebuild(backend_cb)
+	}
+	if failed := report {
+		// Do this before run_compiled_executable_and_exit: successful builds and run
+		// commands exit there, so the caller cannot reliably submit the report later.
+		consume_external_c_error_bug_report(pref_, failed)
 	}
 	b.exit_on_invalid_syntax()
 	// running does not require the parsers anymore

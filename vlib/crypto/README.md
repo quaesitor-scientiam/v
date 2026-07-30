@@ -13,7 +13,26 @@ to create a destination buffer of the correct size to receive the decrypted data
 
 The implementations here are loosely based on [Go's crypto package](https://pkg.go.dev/crypto).
 
+Use `crypto.rand.bytes(n)` to allocate `n` cryptographically secure random bytes, or
+`crypto.rand.read(mut buffer)` to fill an existing buffer. Both APIs use the operating
+system's cryptographically secure random source and can return an error. The separate
+`rand` module provides faster, seedable pseudorandom generators for non-security-sensitive uses.
+
 ## Examples
+
+### Constant-time comparisons
+
+Use `crypto.subtle` for low-level helpers whose running time does not depend on secret data:
+
+```v
+import crypto.subtle
+
+fn main() {
+	expected := [u8(1), 2, 3]
+	actual := [u8(1), 2, 3]
+	assert subtle.constant_time_compare(expected, actual) == 1
+}
+```
 
 ### AES
 

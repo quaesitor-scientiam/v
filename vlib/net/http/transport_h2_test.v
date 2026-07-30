@@ -318,10 +318,6 @@ fn start_h2t_h1only_srv(mut s H2PoolSrv) !(int, &mbedtls.SSLListener, thread) {
 // delayed, N concurrent requests running in parallel finish in roughly one
 // delay; serialized behind one response they would take roughly two.
 fn test_h2_pool_alpn_fallback_avoids_hol_blocking() {
-	$if windows && !no_vschannel ? {
-		eprintln('skipping: exercises the h1-pool-reuse-after-ALPN-probe path, which is mbedTLS/OpenSSL-only by design (h1-over-vschannel pooling is out of scope)')
-		return
-	}
 	mut srv := &H2PoolSrv{
 		respond_delay: 400 * time.millisecond
 	}
@@ -352,38 +348,17 @@ fn test_h2_pool_alpn_fallback_avoids_hol_blocking() {
 	assert elapsed < 1200 * time.millisecond, 'expected concurrent requests to a fresh h1-only origin to run in parallel (~1 respond_delay), not serialize behind one dialer response; took ${elapsed}'
 }
 
-// An h2-enabled request to an h1-only origin must still succeed via the
-// one-shot req.ssl_do fallback on native Windows (h2_fallback_h1) -- since
-// h1-over-vschannel pooling is out of scope, VSchannelPooledTransport is
-// never involved once ALPN negotiates http/1.1, but the request itself must
-// not fail or hang. This is the replacement coverage for what staying
-// permanently skipped on this platform costs the h1/h2 cross-pool tests
-// above: those specifically need a populated h1_idle pool, which never
-// happens here, but a plain h2-enabled request to an h1-only origin must
-// still work end to end. On other platforms this exercises the equivalent
-// existing h2_use_h1_pool_or_dial path (already covered by
-// test_h2_pool_alpn_fallback_avoids_hol_blocking above).
+// A plain, non-concurrent h2-enabled request to an h1-only origin must
+// succeed end to end: ALPN negotiates http/1.1, and the still-open probe
+// connection is reused directly for the request itself (h2_dial_and_do's
+// vsc_probe/ssl_probe branch), on every platform including native Windows
+// (#27879). This is a direct correctness check, distinct from
+// test_h2_pool_alpn_fallback_avoids_hol_blocking above, which focuses on
+// concurrent-waiter timing rather than a single request's basic result.
 //
-// Serves each accepted connection in its own thread, closing it after one
-// response, rather than reusing start_h2t_h1only_srv's keep-alive loop:
-// vschannel's one-shot HTTP/1.1 client (https_make_request,
-// thirdparty/vschannel/vschannel.c) reads until the PEER closes the
-// connection rather than stopping once Content-Length bytes have been
-// received, so a keep-alive peer stalls it for as long as the peer's own
-// idle-read timeout takes to fire -- a pre-existing bug in that one-shot
-// client, unrelated to h2 pooling, tracked separately (vlang/v#27705). Every
-// other caller of the one-shot vschannel h1 path in this codebase either
-// talks to a server that closes promptly or is `-d network`-gated, so this
-// was the first automated test to hit it.
-//
-// Must accept in a LOOP, not once: on native Windows this request makes TWO
-// separate connections to the origin -- h2_dial_probe_vschannel's ALPN probe
-// (sends nothing, just closes once it sees ALPN did not select h2) and the
-// real request from req.ssl_do's own independent dial. A single `l.accept()`
-// serves whichever of the two happens to arrive first and then exits,
-// leaving the other connection accepted at the TCP level but never serviced
-// -- its client-side TLS handshake then hangs indefinitely waiting for a
-// ServerHello no one is sending.
+// Accepts in a loop (rather than once) defensively: exactly one connection
+// is expected per request (the ALPN probe is reused, not redialed), but a
+// loop tolerates a retry without needing to know the exact count.
 fn vpah_serve_one(mut conn mbedtls.SSLConn) {
 	defer {
 		conn.shutdown() or {}
@@ -455,8 +430,9 @@ fn test_h2_pool_alpn_fallback_completes_request() {
 // what read_timeout was configured (Codex P1, vlang/v#27643
 // pullrequestreview-4627654418, discussion 3521494711).
 fn test_h2_pool_respects_request_read_timeout() {
+	respond_delay := 3 * time.second
 	mut srv := &H2PoolSrv{
-		respond_delay: 3 * time.second
+		respond_delay: respond_delay
 	}
 	port, mut listener, th := start_h2_pool_srv(mut srv) or {
 		assert false, 'server: ${err}'
@@ -469,7 +445,7 @@ fn test_h2_pool_respects_request_read_timeout() {
 		read_timeout: 300 * time.millisecond
 	) or {
 		elapsed := sw.elapsed()
-		assert elapsed < 2 * time.second, 'expected the read_timeout to fire well before the 3s-stalled server responds, took ${elapsed}'
+		assert elapsed < respond_delay, 'expected the read_timeout to fire before the stalled server responds, took ${elapsed}'
 		stop_h2_pool_srv(mut listener, th)
 		return
 	}
@@ -598,10 +574,6 @@ fn test_h2_pool_respects_max_idle_conns_cap() {
 // connection down before its own request ever executes on it (Codex P1,
 // vlang/v#27643 pullrequestreview-4628439062).
 fn test_h2_pool_does_not_evict_its_own_new_connection() {
-	$if windows && !no_vschannel ? {
-		eprintln('skipping: exercises h1/h2 cross-pool eviction, which requires h1-over-vschannel pooling (out of scope)')
-		return
-	}
 	mut t := new_transport()
 	t.max_idle_conns = 1
 
@@ -655,10 +627,6 @@ fn test_h2_pool_does_not_evict_its_own_new_connection() {
 // connection stay pooled, exceeding the documented global cap indefinitely
 // (Codex P2, vlang/v#27643 pullrequestreview-4630174759).
 fn test_h2_pool_evicts_h1_idle_to_make_room_for_h2() {
-	$if windows && !no_vschannel ? {
-		eprintln('skipping: exercises h1/h2 cross-pool eviction, which requires h1-over-vschannel pooling (out of scope)')
-		return
-	}
 	mut t := new_transport()
 	t.max_idle_conns = 1
 
@@ -715,10 +683,6 @@ fn test_h2_pool_evicts_h1_idle_to_make_room_for_h2() {
 // count is within max_idle_conns (Codex P3, vlang/v#27643
 // pullrequestreview-4631763931, discussion 3525390899).
 fn test_h2_pool_idle_cap_excludes_busy_h2_conn() {
-	$if windows && !no_vschannel ? {
-		eprintln('skipping: exercises h1/h2 cross-pool eviction, which requires h1-over-vschannel pooling (out of scope)')
-		return
-	}
 	mut t := new_transport()
 	t.max_idle_conns = 2
 

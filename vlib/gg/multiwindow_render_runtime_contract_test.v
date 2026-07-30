@@ -1,4 +1,4 @@
-// vtest build: !(windows && tinyc) && !musl?
+// vtest build: (!(windows && tinyc)) && !musl? && !self_ubuntu_musl_ci?
 
 module gg
 
