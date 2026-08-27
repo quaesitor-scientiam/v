@@ -958,6 +958,27 @@ fn test_parse_path_challenge_frame_rejects_truncated_data() {
 	assert false, 'expected truncated PATH_CHALLENGE data to be rejected'
 }
 
+fn test_parse_path_challenge_frame_rejects_data_one_byte_short() {
+	// The exact one-byte-short (7-of-8) boundary -- mirrors
+	// test_parse_path_response_frame_rejects_truncated_data's own coverage
+	// of this boundary for the sibling frame type. Found by adversarial
+	// review (2026-08-27): parse_path_challenge_frame and
+	// parse_path_response_frame are independent, structurally-identical
+	// copy-paste siblings each re-testing the shared
+	// path_challenge_response_data_len constant; without this test, a
+	// stray off-by-one introduced into only ONE of them at this specific
+	// boundary would have gone uncaught (the existing 0-byte and 5-byte
+	// truncation tests both stay well clear of the 7-byte edge).
+	mut buf := encode_varint(frame_type_path_challenge)!
+	buf << []u8{len: 7} // short of the required 8 bytes by exactly one
+	parse_frame(buf) or {
+		assert err.msg().contains('missing')
+		assert err.msg().contains('8-byte')
+		return
+	}
+	assert false, 'expected a PATH_CHALLENGE frame one byte short of 8 to be rejected'
+}
+
 fn test_parse_path_challenge_frame_rejects_empty_after_type() {
 	buf := encode_varint(frame_type_path_challenge)!
 	parse_frame(buf) or {
