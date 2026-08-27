@@ -1504,11 +1504,25 @@ own closing note flagged as "the" deferred follow-up, not an arbitrary pick.
   updating as part of 14b, not left to drift further.
 
 **Sub-phases (same one-sub-phase-per-stacked-PR convention as 12/13):**
-- [ ] **14a** — `PATH_CHALLENGE`/`PATH_RESPONSE` frame wire codec: 8-byte
-      opaque data each, both are probing frames (RFC 9000 §9.1's
-      probing/non-probing frame classification matters for 14c's migration
-      detection). Paired `_test.v`, RFC vector or round-trip cross-check
-      per this project's established convention.
+- [x] **14a** — `PATH_CHALLENGE`/`PATH_RESPONSE` frame wire codec (`frame.v`):
+      `PathChallengeFrame`/`PathResponseFrame`, an 8-byte opaque `data`
+      field each with no length prefix (types 0x1a/0x1b) -- the one wire
+      shape in this file with neither a varint nor an explicit-length
+      prefix, since RFC 9000 §19.17/§19.18 fix it at 64 bits. Encode-side
+      validates the fixed 8-byte length (mirrors
+      `encode_new_connection_id_frame`'s stateless-reset-token check);
+      decode-side bounds-checks before slicing. Wired into `conn.v`'s
+      `dispatch_one_rtt_frame` with an explicit deferred-no-op arm
+      (deliberately not folded into the match's separate
+      purely-informational else arm, since RFC 9000 §8.2.1 actually
+      requires answering a PATH_CHALLENGE -- unlike DATA_BLOCKED/etc --
+      so the arm stays easy to find and revisit in 14c), mirroring 13c's
+      own `NewConnectionIdFrame`/`RetireConnectionIdFrame` precedent
+      exactly: wire codec lands now, the state machine that consumes it
+      is a later sub-phase's job. `dispatch_pre_confirm_frame`'s existing
+      else arm and `frame_is_ack_eliciting`'s existing `else { true }`
+      were both checked against RFC 9000 Table 3/§13.2.1 and already
+      handle both frame types correctly -- neither needed a change.
 - [ ] **14b** — Active connection ID set: issue local CIDs via
       NEW_CONNECTION_ID up to the peer's `active_connection_id_limit`;
       consume the peer's issued CIDs into a pool this endpoint can migrate
