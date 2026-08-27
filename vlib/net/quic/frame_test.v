@@ -259,14 +259,15 @@ fn test_scaled_ack_delay_micros_saturates_at_exponent_ge_64() {
 }
 
 fn test_parse_frame_rejects_unimplemented_frame_type() {
-	// 0x1a (PATH_CHALLENGE) is a real, valid QUIC frame type this module
-	// simply doesn't implement yet -- connection migration is explicitly a
-	// separate, deferrable follow-up (see PROGRESS.md's Phase 13 notes) --
-	// must be a clear "not implemented" error, not a wire-format error or
-	// a panic. (0x08 STREAM, 0x18 NEW_CONNECTION_ID, and 0x1e
-	// HANDSHAKE_DONE, all used here before their respective phases
-	// implemented them, would no longer demonstrate this.)
-	parse_frame([u8(0x1a)]) or {
+	// 0x07 (NEW_TOKEN) is a real, valid QUIC frame type this module
+	// deliberately doesn't implement (retry_token.v's own noted scope
+	// limit: NEW_TOKEN-frame issuance is out of scope -- only Retry-based
+	// address validation is supported) -- must be a clear "not
+	// implemented" error, not a wire-format error or a panic. (0x08
+	// STREAM, 0x18 NEW_CONNECTION_ID, 0x1a PATH_CHALLENGE, and 0x1e
+	// HANDSHAKE_DONE, all previously used here before their respective
+	// phases implemented them, would no longer demonstrate this.)
+	parse_frame([u8(0x07)]) or {
 		assert err.msg().contains('not yet implemented')
 		return
 	}
@@ -859,4 +860,150 @@ fn test_retire_connection_id_frame_round_trip() {
 			assert false, 'expected a RetireConnectionIdFrame'
 		}
 	}
+}
+
+fn test_path_challenge_frame_round_trip() {
+	data := [u8(1), 2, 3, 4, 5, 6, 7, 8]
+	encoded := encode_path_challenge_frame(data)!
+	assert encoded[0] == 0x1a
+	assert encoded.len == 9 // 1-byte type + 8-byte data, no length prefix
+	frame, n := parse_frame(encoded)!
+	assert n == encoded.len
+	match frame {
+		PathChallengeFrame {
+			assert frame.data == data
+		}
+		else {
+			assert false, 'expected a PathChallengeFrame'
+		}
+	}
+}
+
+fn test_path_response_frame_round_trip() {
+	data := [u8(0xff), 0xee, 0xdd, 0xcc, 0xbb, 0xaa, 0x99, 0x88]
+	encoded := encode_path_response_frame(data)!
+	assert encoded[0] == 0x1b
+	assert encoded.len == 9
+	frame, n := parse_frame(encoded)!
+	assert n == encoded.len
+	match frame {
+		PathResponseFrame {
+			assert frame.data == data
+		}
+		else {
+			assert false, 'expected a PathResponseFrame'
+		}
+	}
+}
+
+fn test_path_challenge_frame_round_trip_all_zero_data() {
+	// Zero-valued Data is wire-legal even though a real caller's own
+	// path-validation logic (Phase 14c, not this file) should never
+	// actually send a predictable value -- the codec itself has no
+	// randomness requirement of its own to enforce, matching
+	// PathChallengeFrame's doc comment on where that responsibility lives.
+	data := []u8{len: 8, init: 0}
+	encoded := encode_path_challenge_frame(data)!
+	frame, _ := parse_frame(encoded)!
+	match frame {
+		PathChallengeFrame {
+			assert frame.data == data
+		}
+		else {
+			assert false, 'expected a PathChallengeFrame'
+		}
+	}
+}
+
+fn test_encode_path_challenge_frame_rejects_wrong_data_length() {
+	encode_path_challenge_frame([u8(1), 2, 3]) or {
+		assert err.msg().contains('8 bytes')
+		return
+	}
+	assert false, 'expected a non-8-byte data field to be rejected'
+}
+
+fn test_encode_path_challenge_frame_rejects_empty_data() {
+	encode_path_challenge_frame([]u8{}) or {
+		assert err.msg().contains('8 bytes')
+		return
+	}
+	assert false, 'expected empty data to be rejected'
+}
+
+fn test_encode_path_challenge_frame_rejects_data_too_long() {
+	encode_path_challenge_frame([]u8{len: 9}) or {
+		assert err.msg().contains('8 bytes')
+		return
+	}
+	assert false, 'expected a 9-byte data field to be rejected'
+}
+
+fn test_encode_path_response_frame_rejects_wrong_data_length() {
+	encode_path_response_frame([u8(1), 2, 3, 4, 5, 6, 7]) or {
+		assert err.msg().contains('8 bytes')
+		return
+	}
+	assert false, 'expected a non-8-byte data field to be rejected'
+}
+
+fn test_parse_path_challenge_frame_rejects_truncated_data() {
+	mut buf := encode_varint(frame_type_path_challenge)!
+	buf << []u8{len: 5} // short of the required 8 bytes
+	parse_frame(buf) or {
+		assert err.msg().contains('missing')
+		assert err.msg().contains('8-byte')
+		return
+	}
+	assert false, 'expected truncated PATH_CHALLENGE data to be rejected'
+}
+
+fn test_parse_path_challenge_frame_rejects_empty_after_type() {
+	buf := encode_varint(frame_type_path_challenge)!
+	parse_frame(buf) or {
+		assert err.msg().contains('missing')
+		return
+	}
+	assert false, 'expected a PATH_CHALLENGE frame with no data at all to be rejected'
+}
+
+fn test_parse_path_response_frame_rejects_truncated_data() {
+	mut buf := encode_varint(frame_type_path_response)!
+	buf << []u8{len: 7} // short of the required 8 bytes
+	parse_frame(buf) or {
+		assert err.msg().contains('missing')
+		assert err.msg().contains('8-byte')
+		return
+	}
+	assert false, 'expected truncated PATH_RESPONSE data to be rejected'
+}
+
+fn test_path_challenge_and_path_response_share_no_accidental_state() {
+	// The two frame types are structurally identical on the wire (same
+	// fixed-length Data field) -- confirm parse_frame actually
+	// distinguishes them by type byte rather than one silently aliasing
+	// the other.
+	data := [u8(9), 9, 9, 9, 9, 9, 9, 9]
+	challenge_encoded := encode_path_challenge_frame(data)!
+	response_encoded := encode_path_response_frame(data)!
+	assert challenge_encoded[0] != response_encoded[0]
+
+	challenge_frame, _ := parse_frame(challenge_encoded)!
+	response_frame, _ := parse_frame(response_encoded)!
+	assert challenge_frame is PathChallengeFrame
+	assert response_frame is PathResponseFrame
+}
+
+fn test_parse_frames_handles_path_challenge_then_path_response() {
+	// A packet legitimately carrying both in sequence (e.g. a peer
+	// piggy-backing its own PATH_CHALLENGE on the packet answering ours) --
+	// parse_frames must walk past the first frame's fixed 8-byte payload
+	// correctly to find the second frame's type byte, not misalign on a
+	// frame shape with no length prefix.
+	mut buf := encode_path_challenge_frame([u8(1), 1, 1, 1, 1, 1, 1, 1])!
+	buf << encode_path_response_frame([u8(2), 2, 2, 2, 2, 2, 2, 2])!
+	frames := parse_frames(buf)!
+	assert frames.len == 2
+	assert frames[0] is PathChallengeFrame
+	assert frames[1] is PathResponseFrame
 }

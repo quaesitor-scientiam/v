@@ -242,6 +242,36 @@ pub:
 	sequence_number u64
 }
 
+// PathChallengeFrame represents a PATH_CHALLENGE frame (type 0x1a, RFC 9000
+// §19.17): an 8-byte value sent to check reachability of a peer, or as part
+// of path validation during connection migration (Phase 14). The receiver
+// MUST echo `data` back unmodified in a PATH_RESPONSE frame (§19.18).
+// Generating an unpredictable `data` value (RFC 9000 §8.2.1 implies this
+// indirectly: an attacker who could guess it could forge a PATH_RESPONSE
+// without ever seeing the challenge) and deciding when to send one at all
+// is connection-state/path-validation-state this parser has no access to --
+// deferred to the caller, same division as every other connection-state-
+// dependent requirement in this file (see NewConnectionIdFrame's doc
+// comment for the precedent). RFC 9000 §8.2.1's requirement that a datagram
+// carrying this frame be padded to at least 1200 bytes (unless the sender's
+// own anti-amplification limit forbids it) is likewise a datagram-assembly
+// responsibility, not this frame's own encoding.
+pub struct PathChallengeFrame {
+pub:
+	data []u8 // always exactly 8 bytes
+}
+
+// PathResponseFrame represents a PATH_RESPONSE frame (type 0x1b, RFC 9000
+// §19.18): sent in reply to a PATH_CHALLENGE, echoing its exact 8-byte
+// `data` value back unmodified. Whether a received PATH_RESPONSE actually
+// matches an outstanding PATH_CHALLENGE this endpoint itself sent -- the
+// check that actually validates a path (RFC 9000 §8.2.3) -- is connection-
+// state the parser has no access to; deferred to the caller.
+pub struct PathResponseFrame {
+pub:
+	data []u8 // always exactly 8 bytes
+}
+
 pub type QuicFrame = AckFrame
 	| ConnectionCloseFrame
 	| CryptoFrame
@@ -252,6 +282,8 @@ pub type QuicFrame = AckFrame
 	| MaxStreamsFrame
 	| NewConnectionIdFrame
 	| PaddingFrame
+	| PathChallengeFrame
+	| PathResponseFrame
 	| PingFrame
 	| ResetStreamFrame
 	| RetireConnectionIdFrame
@@ -278,6 +310,8 @@ const frame_type_streams_blocked_bidi = u64(0x16)
 const frame_type_streams_blocked_uni = u64(0x17)
 const frame_type_new_connection_id = u64(0x18)
 const frame_type_retire_connection_id = u64(0x19)
+const frame_type_path_challenge = u64(0x1a)
+const frame_type_path_response = u64(0x1b)
 const frame_type_connection_close_transport = u64(0x1c)
 const frame_type_connection_close_application = u64(0x1d)
 const frame_type_handshake_done = u64(0x1e)
@@ -355,6 +389,14 @@ pub fn parse_frame(buf []u8) !(QuicFrame, int) {
 
 	if typ == frame_type_retire_connection_id {
 		return parse_retire_connection_id_frame(buf, typ_len)
+	}
+
+	if typ == frame_type_path_challenge {
+		return parse_path_challenge_frame(buf, typ_len)
+	}
+
+	if typ == frame_type_path_response {
+		return parse_path_response_frame(buf, typ_len)
 	}
 
 	if typ == frame_type_connection_close_transport
@@ -695,6 +737,32 @@ fn parse_retire_connection_id_frame(buf []u8, start int) !(QuicFrame, int) {
 	}), start + n1
 }
 
+// path_challenge_response_data_len is the fixed wire size of a
+// PATH_CHALLENGE/PATH_RESPONSE frame's Data field (RFC 9000 §19.17/§19.18:
+// 64 bits, unlike every other multi-byte field in this file, which is
+// varint- or explicit-length-prefixed).
+const path_challenge_response_data_len = 8
+
+fn parse_path_challenge_frame(buf []u8, start int) !(QuicFrame, int) {
+	if start + path_challenge_response_data_len > buf.len {
+		return error('quic: PATH_CHALLENGE frame: missing ${path_challenge_response_data_len}-byte data field')
+	}
+	data := buf[start..start + path_challenge_response_data_len].clone()
+	return QuicFrame(PathChallengeFrame{
+		data: data
+	}), start + path_challenge_response_data_len
+}
+
+fn parse_path_response_frame(buf []u8, start int) !(QuicFrame, int) {
+	if start + path_challenge_response_data_len > buf.len {
+		return error('quic: PATH_RESPONSE frame: missing ${path_challenge_response_data_len}-byte data field')
+	}
+	data := buf[start..start + path_challenge_response_data_len].clone()
+	return QuicFrame(PathResponseFrame{
+		data: data
+	}), start + path_challenge_response_data_len
+}
+
 fn parse_connection_close_frame(buf []u8, start int, is_application_error bool) !(QuicFrame, int) {
 	mut offset := start
 	error_code, n1 := decode_varint(buf[offset..])!
@@ -966,6 +1034,34 @@ pub fn encode_new_connection_id_frame(sequence_number u64, retire_prior_to u64, 
 pub fn encode_retire_connection_id_frame(sequence_number u64) ![]u8 {
 	mut out := encode_varint(frame_type_retire_connection_id)!
 	out << encode_varint(sequence_number)!
+	return out
+}
+
+// encode_path_challenge_frame serializes a PATH_CHALLENGE frame. `data`
+// must be exactly `path_challenge_response_data_len` (8) bytes (RFC 9000
+// §19.17); generating an unpredictable value is the caller's
+// responsibility (see PathChallengeFrame's doc comment), not this
+// function's.
+pub fn encode_path_challenge_frame(data []u8) ![]u8 {
+	if data.len != path_challenge_response_data_len {
+		return error('quic: encode_path_challenge_frame: data must be exactly ${path_challenge_response_data_len} bytes, got ${data.len}')
+	}
+	mut out := encode_varint(frame_type_path_challenge)!
+	out << data
+	return out
+}
+
+// encode_path_response_frame serializes a PATH_RESPONSE frame. `data` must
+// be exactly `path_challenge_response_data_len` (8) bytes (RFC 9000
+// §19.18) and, per the caller's own responsibility (see
+// PathResponseFrame's doc comment), should be the exact value most
+// recently received in the PATH_CHALLENGE this endpoint is answering.
+pub fn encode_path_response_frame(data []u8) ![]u8 {
+	if data.len != path_challenge_response_data_len {
+		return error('quic: encode_path_response_frame: data must be exactly ${path_challenge_response_data_len} bytes, got ${data.len}')
+	}
+	mut out := encode_varint(frame_type_path_response)!
+	out << data
 	return out
 }
 

@@ -1352,6 +1352,27 @@ fn (mut c QuicConn) dispatch_one_rtt_frame(frame QuicFrame, now u64, mut result 
 			// function's own CryptoFrame arm ignores post-handshake
 			// CRYPTO for an unimplemented feature.
 		}
+		PathChallengeFrame, PathResponseFrame {
+			// Legal here (RFC 9000 §12.4 Table 3 marks PATH_RESPONSE
+			// 1-RTT-only and PATH_CHALLENGE 0-RTT/1-RTT, so
+			// dispatch_pre_confirm_frame's own rejection of both in the
+			// Initial/Handshake spaces, via its unchanged generic else
+			// arm, is already correct), decoded (frame.v, Phase 14a), but
+			// not yet acted upon: responding to a PATH_CHALLENGE with a
+			// matching PATH_RESPONSE, and validating a PATH_RESPONSE
+			// against an outstanding challenge this endpoint sent, is
+			// path-validation state -- Phase 14c's job, not yet built.
+			// Same deliberate-defer shape as this function's own
+			// NewConnectionIdFrame/RetireConnectionIdFrame arm just above:
+			// the wire codec exists so that state machine has something
+			// to consume once it lands; until then, a peer sending either
+			// is simply ignored, NOT folded into this match's own
+			// "purely informational, no MUST response" else arm below --
+			// unlike DATA_BLOCKED/STREAM_DATA_BLOCKED/STREAMS_BLOCKED,
+			// RFC 9000 §8.2.1 DOES require answering a PATH_CHALLENGE, so
+			// this arm exists to be easy to find and revisit in 14c,
+			// rather than silently reading as "nothing to do here ever."
+		}
 		else {
 			// DATA_BLOCKED/STREAM_DATA_BLOCKED/STREAMS_BLOCKED: purely
 			// informational hints (RFC 9000 §19.12-§19.14 impose no MUST
