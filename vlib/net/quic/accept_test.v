@@ -264,3 +264,122 @@ fn test_accept_rejects_undersized_initial_datagram() {
 	}
 	assert false, 'accept() must reject a datagram under the 1200-byte anti-amplification floor'
 }
+
+// accept_test_transport_parameters_with_cid_limit is
+// accept_test_transport_parameters' own base plus an explicit
+// active_connection_id_limit -- the shared helper deliberately leaves it
+// unset (so OTHER tests in this file exercise the RFC 9000 §18.2 default of
+// 2), but Phase 14b's own real end-to-end test below wants a peer limit
+// bigger than 2 to prove the "replenish up to several, not just one more"
+// path, not only the degenerate single-extra-CID case.
+fn accept_test_transport_parameters_with_cid_limit(limit u64) QuicTransportParameters {
+	mut p := accept_test_transport_parameters()
+	p.active_connection_id_limit = limit
+	return p
+}
+
+// test_dial_and_accept_negotiates_active_connection_id_set is Phase 14b's
+// own real end-to-end proof, one layer up from
+// active_connection_id_set_test.v's pure accounting-type tests and
+// conn_test.v's dispatch-level tests (which inject manually-constructed
+// frames into ONE side): two genuine, independently-constructed QuicConn
+// objects drive each other through a full handshake with actual UDP
+// datagram bytes as the only channel between them, each side's own
+// NEW_CONNECTION_ID frames arriving at and being correctly processed by the
+// OTHER side's real dispatch_one_rtt_frame -- not merely that each side's
+// bookkeeping is internally self-consistent (the same rationale
+// test_dial_and_accept_full_handshake_and_stream_exchange's own doc comment
+// gives for existing at all, applied to this phase's own new surface).
+fn test_dial_and_accept_negotiates_active_connection_id_set() {
+	mut signing_key := ecdsa.new_key_from_seed(accept_test_key_seed, fixed_size: true)!
+	defer {
+		signing_key.free()
+	}
+
+	dial_params := DialParams{
+		server_name:          'localhost'
+		ca_bundle_pem:        accept_test_cert_pem
+		alpn_protocols:       ['h3']
+		transport_parameters: accept_test_transport_parameters_with_cid_limit(4)
+	}
+	mut client, client_dg := dial(dial_params, 0)!
+	mut client_hs := client.client_handshake()
+	defer {
+		client_hs.free()
+	}
+
+	accept_params := AcceptParams{
+		transport_parameters: accept_test_transport_parameters_with_cid_limit(4)
+		alpn_protocols:       ['h3']
+		certificate_chain:    [
+			CertificateEntry{
+				cert_data: accept_test_pem_to_der(accept_test_cert_pem)
+			},
+		]
+		signing_key:          signing_key
+	}
+	mut server, mut server_result := accept(client_dg.bytes, accept_params, 0)!
+	defer {
+		if mut sh := server.server_handshake {
+			sh.free()
+		}
+	}
+
+	// Same bounded pump-until-quiet shape as
+	// test_dial_and_accept_full_handshake_and_stream_exchange -- CID
+	// issuance rides the SAME drain_outgoing/poll() cycle as the handshake
+	// itself (drain_pending_new_connection_ids fires alongside
+	// drain_flow_control_raises, both gated on app_write_keys existing),
+	// so no separate driving step is needed for it to converge here too.
+	mut client_outgoing := []QuicDatagram{}
+	mut server_outgoing := server_result.outgoing.clone()
+	mut now := u64(0)
+	mut rounds := 0
+	for (client_outgoing.len > 0 || server_outgoing.len > 0) && rounds < 20 {
+		rounds += 1
+		now += 10
+		mut next_client_outgoing := []QuicDatagram{}
+		mut next_server_outgoing := []QuicDatagram{}
+		for dg in server_outgoing {
+			r := client.poll(dg.bytes, now)!
+			next_client_outgoing << r.outgoing
+		}
+		for dg in client_outgoing {
+			r := server.poll(dg.bytes, now)!
+			next_server_outgoing << r.outgoing
+		}
+		client_outgoing = next_client_outgoing.clone()
+		server_outgoing = next_server_outgoing.clone()
+	}
+	assert rounds < 20, 'handshake + CID negotiation did not converge within 20 rounds'
+	assert client.state() == .established
+	assert server.state() == .established
+
+	// Each side's OWN issued set reaches the OTHER's advertised limit (4):
+	// sequence 0 (the seed) plus 3 more via drain_pending_new_connection_ids.
+	assert client.local_cid_set.active_count() == 4
+	assert server.local_cid_set.active_count() == 4
+
+	// Each side's PEER set mirrors what the other actually issued -- the
+	// real proof this isn't just "each side thinks it sent 3 frames," but
+	// that the wire round trip and the receiving side's
+	// dispatch_one_rtt_frame/note_new_connection_id path genuinely landed
+	// all of them.
+	assert client.peer_cid_set.active_count() == 4
+	assert server.peer_cid_set.active_count() == 4
+
+	// Every locally-issued CID's stateless_reset_token was also correctly
+	// carried across the wire and recorded on the receiving side's
+	// StatelessResetTracker (not just counted) -- spot-check one non-seed
+	// entry each way.
+	client_issued_seq1 := client.local_cid_set.entries[u64(1)] or {
+		panic('client must have issued sequence 1')
+	}
+	assert server.stateless_reset.is_stateless_reset(client_issued_seq1.connection_id,
+		client_issued_seq1.stateless_reset_token)
+	server_issued_seq1 := server.local_cid_set.entries[u64(1)] or {
+		panic('server must have issued sequence 1')
+	}
+	assert client.stateless_reset.is_stateless_reset(server_issued_seq1.connection_id,
+		server_issued_seq1.stateless_reset_token)
+}

@@ -1528,3 +1528,253 @@ fn test_stream_recv_status_reports_all_three_terminal_states() {
 	uni_id := c.open_stream(false)!
 	assert c.stream_recv_status(uni_id) == none
 }
+
+// -- Phase 14b: active connection ID set dispatch wiring --------------------
+// These test conn.v's actual NewConnectionIdFrame/RetireConnectionIdFrame
+// dispatch arms directly (mirroring test_handshake_done_rejected_when_role_is_server's
+// own established pattern: drive_to_established + a manually constructed
+// frame through dispatch_one_rtt_frame), not just active_connection_id_set.v's
+// pure accounting logic (already covered by active_connection_id_set_test.v)
+// -- proving the WIRING (error propagation, c.stateless_reset recording,
+// c.pending_retire_connection_ids queuing) is correct, not only the isolated
+// types. A real bidirectional dial()/accept() pair additionally proves the
+// wire-level round trip end to end -- see accept_test.v's
+// test_dial_and_accept_negotiates_active_connection_id_set.
+
+fn test_dispatch_new_connection_id_frame_grows_peer_cid_set() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	assert c.peer_cid_set.active_count() == 1 // seed only, so far
+
+	mut result := PollResult{}
+	frame := NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       0
+		connection_id:         [u8(9), 9, 9, 9, 9, 9, 9, 9]
+		stateless_reset_token: []u8{len: 16, init: 0xcd}
+	}
+	c.dispatch_one_rtt_frame(frame, now, mut result)!
+	assert c.peer_cid_set.active_count() == 2
+}
+
+fn test_dispatch_new_connection_id_frame_records_stateless_reset_token() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	cid := [u8(9), 9, 9, 9, 9, 9, 9, 9]
+	token := []u8{len: 16, init: 0xcd}
+	mut result := PollResult{}
+	c.dispatch_one_rtt_frame(NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       0
+		connection_id:         cid
+		stateless_reset_token: token
+	}, now, mut result)!
+	// token itself, len 16 -- its own trailing 16 bytes are the whole
+	// buffer, so it doubles as a minimal stand-in "datagram" here.
+	assert c.stateless_reset.is_stateless_reset(cid, token)
+}
+
+fn test_dispatch_new_connection_id_frame_rejects_sequence_reused_with_different_cid() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	mut result := PollResult{}
+	c.dispatch_one_rtt_frame(NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       0
+		connection_id:         [u8(9), 9, 9, 9, 9, 9, 9, 9]
+		stateless_reset_token: []u8{len: 16}
+	}, now, mut result)!
+	c.dispatch_one_rtt_frame(NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       0
+		connection_id:         [u8(8), 8, 8, 8, 8, 8, 8, 8]
+		stateless_reset_token: []u8{len: 16}
+	}, now, mut result) or {
+		assert err.msg().contains('different connection_id')
+		return
+	}
+	assert false, 'expected reusing a sequence number with a different connection_id to be rejected'
+}
+
+fn test_dispatch_new_connection_id_frame_over_limit_closes_with_connection_id_limit_error() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	// Force a tight limit: sequence 0 alone already meets it, so accepting
+	// one more MUST be rejected as CONNECTION_ID_LIMIT_ERROR (RFC 9000
+	// §5.1.1). own_active_connection_id_limit is package-private state this
+	// test file can set directly, the same way it reaches into c.role above.
+	c.own_active_connection_id_limit = 1
+	mut result := PollResult{}
+	c.dispatch_one_rtt_frame(NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       0
+		connection_id:         [u8(9), 9, 9, 9, 9, 9, 9, 9]
+		stateless_reset_token: []u8{len: 16}
+	}, now, mut result) or {
+		assert err.msg().contains('CONNECTION_ID_LIMIT_ERROR')
+		assert err.code() == int(quic_error_connection_id_limit)
+		return
+	}
+	assert false, 'expected exceeding own_active_connection_id_limit to be rejected'
+}
+
+fn test_dispatch_new_connection_id_frame_retire_prior_to_queues_retirement() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	assert c.pending_retire_connection_ids.len == 0
+	mut result := PollResult{}
+	// Bumps retire_prior_to past sequence 0 (the seed), which this
+	// endpoint was already holding -- must queue a RETIRE_CONNECTION_ID(0).
+	c.dispatch_one_rtt_frame(NewConnectionIdFrame{
+		sequence_number:       1
+		retire_prior_to:       1
+		connection_id:         [u8(9), 9, 9, 9, 9, 9, 9, 9]
+		stateless_reset_token: []u8{len: 16}
+	}, now, mut result)!
+	assert c.pending_retire_connection_ids == [u64(0)]
+	assert c.peer_cid_set.active_count() == 1 // seq 0 retired, seq 1 remains
+
+	// drain_pending_retire_connection_ids (called from drain_outgoing on
+	// every poll(), see conn.v) must actually send it and clear the queue.
+	poll_result := c.poll(none, now)!
+	assert poll_result.outgoing.len > 0
+	assert c.pending_retire_connection_ids.len == 0
+}
+
+fn test_dispatch_retire_connection_id_frame_shrinks_local_cid_set() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	// Not asserted at exactly 1: drive_to_established's own internal
+	// poll()s already reach the point where drain_pending_new_connection_ids
+	// fires (peer_active_connection_id_limit defaults to 2), so the seed
+	// alone is not the real starting point for an already-established
+	// connection -- capture whatever it actually is as a baseline instead.
+	baseline := c.local_cid_set.active_count()
+	mut result := PollResult{}
+	// Force-issue one more local CID directly (bypassing the peer-limit-
+	// driven replenish loop, which this test doesn't need) so there is
+	// definitely a non-seed sequence number to retire.
+	seq := c.local_cid_set.issue_next([u8(9), 9, 9, 9, 9, 9, 9, 9], []u8{len: 16})
+	assert c.local_cid_set.active_count() == baseline + 1
+
+	c.dispatch_one_rtt_frame(RetireConnectionIdFrame{
+		sequence_number: seq
+	}, now, mut result)!
+	assert c.local_cid_set.active_count() == baseline
+}
+
+fn test_dispatch_retire_connection_id_frame_rejects_never_issued_sequence() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	mut result := PollResult{}
+	c.dispatch_one_rtt_frame(RetireConnectionIdFrame{
+		sequence_number: 99
+	}, now, mut result) or {
+		assert err.msg().contains('never issued')
+		assert err.msg().contains('PROTOCOL_VIOLATION')
+		return
+	}
+	assert false, 'expected retiring a never-issued local sequence number to be rejected'
+}
+
+fn test_drain_pending_new_connection_ids_replenishes_up_to_peer_limit() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	c.peer_active_connection_id_limit = 4
+	// Not asserted at exactly 1: see
+	// test_dispatch_retire_connection_id_frame_shrinks_local_cid_set's own
+	// note on why an already-established connection isn't seed-only.
+	assert c.local_cid_set.active_count() < 4
+
+	poll_result := c.poll(none, now)!
+	assert poll_result.outgoing.len > 0
+	assert c.local_cid_set.active_count() == 4
+
+	// Idempotent once at the limit: a further poll() must not keep issuing
+	// more (RFC 9000 §5.1.1 -- "MUST NOT provide more connection IDs than
+	// the peer's limit").
+	further := c.poll(none, now + 10)!
+	assert c.local_cid_set.active_count() == 4
+	_ := further
+}
+
+// test_process_one_rtt_packet_accepts_non_seed_local_cid is a regression
+// test for a real gap found in 14b's own /vreview pass (2026-08-27, see
+// [[code-review-misses]]): an earlier version of process_one_rtt_packet's
+// DCID check compared only against c.scid, so a packet addressed to any
+// NEWLY-issued local CID was silently dropped as unrecognized -- making
+// this whole feature pointless even in the single best case (a packet
+// somehow already reaching this exact connection's own poll() call, no
+// listener/routing concern involved at all). Proven via a real encrypted,
+// wire-shaped packet (build_fake_one_rtt_packet), not a direct
+// LocalConnectionIdSet.contains() unit check -- the regression was in the
+// WIRING between the two, which a pure accounting-type test can't see.
+fn test_process_one_rtt_packet_accepts_non_seed_local_cid() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	extra_cid := [u8(9), 9, 9, 9, 9, 9, 9, 9]
+	c.local_cid_set.issue_next(extra_cid, []u8{len: 16})
+
+	read_keys := c.app_read_keys or { panic('unreachable: established asserts this') }
+	server_app_keys := read_keys.current_keys
+	frame := encode_stream_frame(1, 0, 'via non-seed cid'.bytes(), true, true)!
+	datagram := build_fake_one_rtt_packet(extra_cid, 0, frame, server_app_keys, false)!
+	c.poll(datagram.bytes, now)!
+	status := c.stream_recv_status(1) or {
+		panic('expected the stream to be known -- the packet addressed to the non-seed CID must have been accepted and dispatched, not silently dropped')
+	}
+	assert status.state == .fin_received
+}
+
+// test_dispatch_retire_connection_id_frame_refuses_to_empty_local_cid_set
+// is the dispatch-level proof of LocalConnectionIdSet.retire's own guard
+// (active_connection_id_set_test.v has the pure unit-level version) --
+// confirms the guard actually fires through the real RETIRE_CONNECTION_ID
+// frame-dispatch path, with the right error propagation (PROTOCOL_VIOLATION).
+fn test_dispatch_retire_connection_id_frame_refuses_to_empty_local_cid_set() {
+	mut c, _, now := drive_to_established(generous_transport_params(), generous_transport_params())!
+	defer {
+		c.client_handshake().free()
+	}
+	// Retire every CID drive_to_established's own internal replenish left
+	// active, except one -- leaving exactly one, so the NEXT retire is the
+	// one that would empty the set.
+	mut seqs := []u64{}
+	for seq, _ in c.local_cid_set.entries {
+		seqs << seq
+	}
+	for i := 0; i < seqs.len - 1; i++ {
+		c.local_cid_set.retire(seqs[i])!
+	}
+	assert c.local_cid_set.active_count() == 1
+	last_seq := seqs[seqs.len - 1]
+
+	mut result := PollResult{}
+	c.dispatch_one_rtt_frame(RetireConnectionIdFrame{
+		sequence_number: last_seq
+	}, now, mut result) or {
+		assert err.msg().contains('zero active connection IDs')
+		assert err.msg().contains('PROTOCOL_VIOLATION')
+		assert c.local_cid_set.active_count() == 1
+		return
+	}
+	assert false, 'expected retiring the last active local CID via a real dispatched frame to be refused'
+}

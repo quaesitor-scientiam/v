@@ -216,11 +216,24 @@ pub fn accept(raw_datagram []u8, params AcceptParams, now u64) !(&QuicConn, Poll
 		stateless_reset:          new_stateless_reset_tracker()
 		connection_start:         now
 		own_transport_parameters: own_params
-		streams:                  new_quic_stream_set(.server)
-		conn_send_window:         new_flow_control_window(0)
-		conn_recv_window:         new_receive_window(own_params.initial_max_data or { u64(0) })
-		local_max_streams_bidi:   own_params.initial_max_streams_bidi or { u64(0) }
-		local_max_streams_uni:    own_params.initial_max_streams_uni or { u64(0) }
+		local_cid_set:            new_local_connection_id_set(scid)
+		// header.scid, not original_dcid/header.dcid -- the CLIENT's real,
+		// persistent scid is already known here (its very first packet),
+		// unlike a dialing client's own initial guess. See
+		// new_peer_connection_id_set's own doc comment on why the two
+		// roles' first seed differs.
+		peer_cid_set:                    new_peer_connection_id_set(header.scid)
+		own_active_connection_id_limit:  own_params.active_connection_id_limit or {
+			default_active_connection_id_limit
+		}
+		peer_active_connection_id_limit: default_active_connection_id_limit
+		streams:                         new_quic_stream_set(.server)
+		conn_send_window:                new_flow_control_window(0)
+		conn_recv_window:                new_receive_window(own_params.initial_max_data or {
+			u64(0)
+		})
+		local_max_streams_bidi:          own_params.initial_max_streams_bidi or { u64(0) }
+		local_max_streams_uni:           own_params.initial_max_streams_uni or { u64(0) }
 	}
 
 	result := c.poll(raw_datagram, now)!

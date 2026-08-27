@@ -2,6 +2,7 @@ module quic
 
 import time
 import rand
+import crypto.rand as csrand
 
 // RFC 9000/9001 — QuicConn is the top-level connection struct wiring
 // together every independently-built piece from Phases 0-8: packet/header
@@ -24,10 +25,23 @@ import rand
 // poll()/process_timeouts() to advance it. Nothing happens off the
 // caller's own call stack -- no locks, no background threads.
 //
-// Connection ID rotation/migration is explicitly out of v1 scope (not
-// deferred -- stateless_reset.v/pmtu.v both already say so independently):
-// exactly one local `scid` and one tracked peer `dcid`, no active CID set,
-// no NEW_CONNECTION_ID/RETIRE_CONNECTION_ID.
+// Connection ID SET bookkeeping (RFC 9000 §5.1) is Phase 14b's own scope
+// (local_cid_set/peer_cid_set, active_connection_id_set.v): issuing and
+// tracking multiple valid CIDs on both sides, NEW_CONNECTION_ID/
+// RETIRE_CONNECTION_ID send and receive, CONNECTION_ID_LIMIT_ERROR --
+// process_one_rtt_packet accepts an incoming packet addressed to ANY of
+// this connection's own currently-active local CIDs, not just c.scid.
+// What remains genuinely out of scope, deliberately (not merely deferred):
+// actually SWITCHING this connection's active `dcid` to one of the peer's
+// pooled CIDs, or deciding WHEN to (path validation via PATH_CHALLENGE/
+// PATH_RESPONSE, Phase 14c/14e's job -- see PROGRESS.md); and, for a
+// SERVER specifically, registering a newly-issued local CID with
+// QuicListener's own MULTI-connection routing table (still keyed only by
+// each connection's original scid, listener.v) so the listener itself can
+// find the right QuicConn for a packet addressed to one of them (Phase
+// 14d's job) -- this connection's OWN acceptance already works the moment
+// a packet somehow reaches its poll() call. pmtu.v's own scope note is
+// unrelated (PMTU discovery, not CID lifecycle) and still accurate as-is.
 
 // local_cid_len is this endpoint's own chosen connection-ID length -- within
 // RFC 9000 §17.2's 20-byte v1 limit, matching common real-world practice
@@ -236,6 +250,25 @@ mut:
 	// -- Phase 9b: steady-state 1-RTT state ---------------------------------
 	own_transport_parameters QuicTransportParameters
 
+	// -- Phase 14b: active connection ID set (RFC 9000 §5.1) ----------------
+	// local_cid_set: CIDs THIS endpoint has issued (active_connection_id_set.v).
+	// peer_cid_set: CIDs the PEER has issued to this endpoint. Both are seeded
+	// at construction (dial()/accept(), scid/dcid already known then);
+	// *_active_connection_id_limit are cached once at construction
+	// (own_active_connection_id_limit, from own_transport_parameters -- fixed
+	// for this connection's lifetime) or updated once the peer's transport
+	// parameters arrive (peer_active_connection_id_limit, defaulting to RFC
+	// 9000 §18.2's 2 until then). pending_retire_connection_ids queues
+	// sequence numbers (in peer_cid_set) this endpoint has decided to retire
+	// -- drained by drain_pending_retire_connection_ids, the same
+	// queue-now-drain-later shape every other pending_* field in this struct
+	// already uses.
+	local_cid_set                   LocalConnectionIdSet
+	peer_cid_set                    PeerConnectionIdSet
+	own_active_connection_id_limit  u64
+	peer_active_connection_id_limit u64
+	pending_retire_connection_ids   []u64
+
 	streams              &QuicStreamSet
 	stream_send_windows  map[u64]&FlowControlWindow
 	stream_recv_windows  map[u64]&ReceiveWindow
@@ -322,17 +355,21 @@ pub fn (c &QuicConn) role() QuicRole {
 }
 
 // connection_id returns a stable string identity for this connection,
-// derived from its own scid -- a package-private field with no other public
-// accessor (v1 never issues additional connection IDs beyond it, see this
-// file's own "no active CID set" scope note, so a single scid per
-// connection is the whole identity space here; nothing to enumerate).
-// Exists for an external caller managing MANY connections (e.g. a future
-// net.http h3_server.v layering its own per-connection HTTP/3 state on top
-// of a QuicListener-demuxed QuicConn, Phase 13e) that needs SOME key to
-// index its own side-table by -- QuicListener itself never needs this
-// accessor since it lives inside the same module and can read c.scid
-// directly (listener.v's own module doc comment explains that exact
-// reasoning for why it lives here at all).
+// derived from its own ORIGINAL scid (sequence 0) -- a package-private
+// field with no other public accessor. Still just the one, original CID,
+// even though Phase 14b now lets this connection accumulate several valid
+// local CIDs (local_cid_set, active_connection_id_set.v): sequence 0 is
+// permanent for a connection's whole lifetime (never itself retired by
+// anything today; see LocalConnectionIdSet.retire's own guard against
+// emptying the set entirely), while later-issued sequences can come and
+// go, making sequence 0 the only one stable enough to serve as a
+// caller-facing identity key. Exists for an external caller managing MANY
+// connections (e.g. net.http's h3_server.v layering its own
+// per-connection HTTP/3 state on top of a QuicListener-demuxed QuicConn,
+// Phase 13e) that needs SOME key to index its own side-table by --
+// QuicListener itself never needs this accessor since it lives inside the
+// same module and can read c.scid directly (listener.v's own module doc
+// comment explains that exact reasoning for why it lives here at all).
 pub fn (c &QuicConn) connection_id() string {
 	return c.scid.bytestr()
 }
@@ -614,32 +651,40 @@ pub fn dial(params DialParams, now u64) !(&QuicConn, QuicDatagram) {
 	own_max_idle_timeout_ms := own_params.max_idle_timeout or { u64(0) }
 
 	mut c := &QuicConn{
-		role:                     .client
-		state:                    .handshaking
-		original_dcid:            original_dcid
-		dcid:                     original_dcid.clone()
-		scid:                     scid
-		peer_scid:                []u8{}
-		token:                    []u8{}
-		handshake:                handshake
-		handshake_completion:     new_handshake_completion_state()
-		pn_spaces:                new_packet_number_spaces()
-		initial_keys_client:      initial_keys_client
-		initial_keys_server:      initial_keys_server
-		initial_crypto:           new_crypto_stream_reassembler()
-		handshake_crypto:         new_crypto_stream_reassembler()
-		client_hello:             client_hello
-		loss_detection:           new_quic_loss_detection_timer()
-		congestion_control:       new_newreno_congestion_control()
-		own_max_idle_timeout_ms:  own_max_idle_timeout_ms
-		stateless_reset:          new_stateless_reset_tracker()
-		connection_start:         now
-		own_transport_parameters: own_params
-		streams:                  new_quic_stream_set(.client)
-		conn_send_window:         new_flow_control_window(0)
-		conn_recv_window:         new_receive_window(own_params.initial_max_data or { u64(0) })
-		local_max_streams_bidi:   own_params.initial_max_streams_bidi or { u64(0) }
-		local_max_streams_uni:    own_params.initial_max_streams_uni or { u64(0) }
+		role:                            .client
+		state:                           .handshaking
+		original_dcid:                   original_dcid
+		dcid:                            original_dcid.clone()
+		scid:                            scid
+		peer_scid:                       []u8{}
+		token:                           []u8{}
+		handshake:                       handshake
+		handshake_completion:            new_handshake_completion_state()
+		pn_spaces:                       new_packet_number_spaces()
+		initial_keys_client:             initial_keys_client
+		initial_keys_server:             initial_keys_server
+		initial_crypto:                  new_crypto_stream_reassembler()
+		handshake_crypto:                new_crypto_stream_reassembler()
+		client_hello:                    client_hello
+		loss_detection:                  new_quic_loss_detection_timer()
+		congestion_control:              new_newreno_congestion_control()
+		own_max_idle_timeout_ms:         own_max_idle_timeout_ms
+		stateless_reset:                 new_stateless_reset_tracker()
+		connection_start:                now
+		own_transport_parameters:        own_params
+		local_cid_set:                   new_local_connection_id_set(scid)
+		peer_cid_set:                    new_peer_connection_id_set(original_dcid)
+		own_active_connection_id_limit:  own_params.active_connection_id_limit or {
+			default_active_connection_id_limit
+		}
+		peer_active_connection_id_limit: default_active_connection_id_limit
+		streams:                         new_quic_stream_set(.client)
+		conn_send_window:                new_flow_control_window(0)
+		conn_recv_window:                new_receive_window(own_params.initial_max_data or {
+			u64(0)
+		})
+		local_max_streams_bidi:          own_params.initial_max_streams_bidi or { u64(0) }
+		local_max_streams_uni:           own_params.initial_max_streams_uni or { u64(0) }
 	}
 
 	crypto_frame := encode_crypto_frame(0, client_hello)!
@@ -1041,6 +1086,15 @@ fn (mut c QuicConn) process_initial_or_handshake(space QuicPacketNumberSpace, ra
 		// successfully authenticated packet -- never from a spoofed one.
 		c.peer_scid = header.scid.clone()
 		c.dcid = header.scid.clone()
+		// Phase 14b: re-seed peer_cid_set's sequence-0 entry with the
+		// SERVER's real scid -- dial()'s own construction-time seed used
+		// original_dcid, this client's own arbitrary guess, a placeholder
+		// never actually issued by the peer. Not reachable for the server
+		// role (peer_scid is never empty there; accept()'s own
+		// construction-time seed already uses the client's real scid, which
+		// IS known immediately -- see new_peer_connection_id_set's own doc
+		// comment on why the two roles differ here).
+		c.peer_cid_set = new_peer_connection_id_set(header.scid)
 	}
 
 	frames := parse_frames(unprotected.payload)!
@@ -1107,18 +1161,27 @@ fn (mut c QuicConn) process_one_rtt_packet(raw []u8, now u64, mut result PollRes
 		c.note_one_rtt_processing_failed(raw, now, mut result)
 		return
 	}
-	// RFC 9000 §7.2: a packet not addressed to this connection's own SCID
-	// must be silently dropped -- see process_initial_or_handshake's
-	// identical check for the full rationale. Routed through
-	// note_one_rtt_processing_failed (not a bare return) rather than
-	// dropped outright: a genuine stateless reset (RFC 9000 §10.3) is
-	// deliberately shaped like an ordinary short-header packet with
-	// unpredictable bytes where a real DCID would be, so it will almost
-	// always fail this exact check -- the stateless-reset comparison
-	// (against the packet's own trailing bytes, independent of anything
-	// parsed here) MUST still get a chance to run for a DCID mismatch, not
-	// be short-circuited before it ever fires.
-	if short_header.dcid != c.scid {
+	// RFC 9000 §7.2: a packet not addressed to one of this connection's own
+	// valid CIDs must be silently dropped -- see
+	// process_initial_or_handshake's identical check for the full
+	// rationale (that one is correctly scoped to c.scid alone: no
+	// NEW_CONNECTION_ID is legal before 1-RTT, RFC 9000 §12.4 Table 3, so
+	// c.scid is the only valid local CID any Initial/Handshake-space
+	// packet could ever use). Here, at 1-RTT, checked against the WHOLE
+	// LocalConnectionIdSet (Phase 14b), not just c.scid: a peer MAY
+	// legitimately address a packet to ANY CID this endpoint has issued
+	// via NEW_CONNECTION_ID and not yet retired (RFC 9000 §5.1.1) --
+	// checking c.scid alone would make issuing additional CIDs at all
+	// pointless, since every packet addressed to one would be silently
+	// dropped as unrecognized. Routed through note_one_rtt_processing_failed
+	// (not a bare return) rather than dropped outright: a genuine
+	// stateless reset (RFC 9000 §10.3) is deliberately shaped like an
+	// ordinary short-header packet with unpredictable bytes where a real
+	// DCID would be, so it will almost always fail this exact check -- the
+	// stateless-reset comparison (against the packet's own trailing bytes,
+	// independent of anything parsed here) MUST still get a chance to run
+	// for a DCID mismatch, not be short-circuited before it ever fires.
+	if !c.local_cid_set.contains(short_header.dcid) {
 		c.note_one_rtt_processing_failed(raw, now, mut result)
 		return
 	}
@@ -1334,23 +1397,51 @@ fn (mut c QuicConn) dispatch_one_rtt_frame(frame QuicFrame, now u64, mut result 
 				}
 			}
 		}
-		NewConnectionIdFrame, RetireConnectionIdFrame {
-			// Legal here (RFC 9000 §12.4 Table 3 marks both 1-RTT-only,
-			// consistent with dispatch_pre_confirm_frame's own rejection
-			// of them in the Initial/Handshake spaces), accepted, but not
-			// yet acted upon: driving an ACTIVE SET of usable connection
-			// IDs (issuing more as the peer retires them,
-			// active_connection_id_limit accounting, the §19.15/§19.16
-			// requirements that need that same state -- e.g. §19.16's
-			// "sequence number greater than any previously sent" check)
-			// is a deliberately deferred state machine, not yet built --
-			// see stateless_reset.v's doc comment and PROGRESS.md's Phase
-			// 13c scope note. The wire codec these frames now decode
-			// through (frame.v) exists so that state machine has
-			// something to consume once it lands; until then, a peer
-			// sending either is simply ignored, the same as this
-			// function's own CryptoFrame arm ignores post-handshake
-			// CRYPTO for an unimplemented feature.
+		NewConnectionIdFrame {
+			// Legal here (RFC 9000 §12.4 Table 3, 1-RTT-only, consistent
+			// with dispatch_pre_confirm_frame's own rejection of it in
+			// the Initial/Handshake spaces). Phase 14b:
+			// PeerConnectionIdSet.note_new_connection_id enforces the two
+			// requirements that need connection state -- rejecting a
+			// sequence number reused with a different connection_id
+			// (RFC 9000 §19.15) and reporting whether this endpoint is
+			// now over its OWN advertised active_connection_id_limit
+			// (RFC 9000 §5.1.1). `newly_retired` (a retire_prior_to bump
+			// past sequence numbers this endpoint was already holding)
+			// queues RETIRE_CONNECTION_ID sends -- drained by
+			// drain_pending_retire_connection_ids, not sent here
+			// synchronously, the same queue-now-drain-later shape every
+			// other outgoing frame in this file already uses.
+			update := c.peer_cid_set.note_new_connection_id(frame.sequence_number,
+				frame.retire_prior_to, frame.connection_id, frame.stateless_reset_token,
+				c.own_active_connection_id_limit)!
+			// Records this frame's own token with c.stateless_reset
+			// (stateless_reset.v) -- previously only the peer's
+			// sequence-0 token (from its stateless_reset_token
+			// transport parameter) was ever recorded there, since
+			// NEW_CONNECTION_ID frames were entirely ignored before
+			// 14b; this endpoint should recognize a stateless reset
+			// for ANY CID the peer has issued it, not only its first.
+			c.stateless_reset.record_token(frame.connection_id, frame.stateless_reset_token)!
+			for seq in update.newly_retired {
+				c.pending_retire_connection_ids << seq
+			}
+			if update.over_limit {
+				return error_with_code('quic: peer offered more active connection IDs than this endpoint\'s own active_connection_id_limit (${c.own_active_connection_id_limit}) allows (RFC 9000 §5.1.1 CONNECTION_ID_LIMIT_ERROR)',
+					int(quic_error_connection_id_limit))
+			}
+		}
+		RetireConnectionIdFrame {
+			// Legal here, same Table 3 citation as NewConnectionIdFrame
+			// above. LocalConnectionIdSet.retire enforces RFC 9000
+			// §19.16's "sequence number greater than any previously
+			// sent... MUST be treated as a connection error of type
+			// PROTOCOL_VIOLATION" -- the one other §19.16 requirement (a
+			// retire MUST NOT reference the CURRENT packet's own DCID)
+			// needs the packet header at frame-dispatch time, which this
+			// call chain doesn't plumb through; deliberately deferred,
+			// not silently missed -- see PROGRESS.md's Phase 14b entry.
+			c.local_cid_set.retire(frame.sequence_number)!
 		}
 		PathChallengeFrame, PathResponseFrame {
 			// Legal here (RFC 9000 §12.4 Table 3 marks PATH_RESPONSE
@@ -1652,8 +1743,13 @@ fn (mut c QuicConn) dispatch_handshake_message(msg HandshakeMessage, framed []u8
 			c.conn_send_window.raise_limit(peer_params.initial_max_data or { u64(0) })
 			c.peer_max_streams_bidi = peer_params.initial_max_streams_bidi or { u64(0) }
 			c.peer_max_streams_uni = peer_params.initial_max_streams_uni or { u64(0) }
+			c.peer_active_connection_id_limit = peer_params.active_connection_id_limit or {
+				default_active_connection_id_limit
+			}
+
 			if token := peer_params.stateless_reset_token {
 				c.stateless_reset.record_token(c.peer_scid, token)!
+				c.peer_cid_set.set_sequence_zero_token(token)
 			}
 		}
 		.wait_certificate {
@@ -1721,6 +1817,10 @@ fn (mut c QuicConn) dispatch_server_handshake_message(msg HandshakeMessage, fram
 		c.conn_send_window.raise_limit(peer_params.initial_max_data or { u64(0) })
 		c.peer_max_streams_bidi = peer_params.initial_max_streams_bidi or { u64(0) }
 		c.peer_max_streams_uni = peer_params.initial_max_streams_uni or { u64(0) }
+		c.peer_active_connection_id_limit = peer_params.active_connection_id_limit or {
+			default_active_connection_id_limit
+		}
+
 		// A ClientHello's transport parameters have no stateless_reset_token
 		// field (RFC 9000 §18.2 -- only a SERVER sends that one), unlike the
 		// client's .wait_encrypted_extensions arm's identical-looking block
@@ -1954,6 +2054,13 @@ fn (mut c QuicConn) drain_outgoing(now u64, mut result PollResult) ! {
 			// validation (0-RTT, say) doesn't silently reintroduce this
 			// gap (13d-2's own adversarial review, verify pass).
 			c.drain_flow_control_raises(now, mut result)!
+			// Phase 14b: same pre-validation gating rationale as
+			// drain_flow_control_raises just above -- not reachable before
+			// mark_validated() with today's state machine either (both
+			// depend on 1-RTT keys existing), gated anyway for the
+			// identical consistency reason.
+			c.drain_pending_new_connection_ids(now, mut result)!
+			c.drain_pending_retire_connection_ids(now, mut result)!
 		}
 	}
 }
@@ -2052,6 +2159,44 @@ fn (mut c QuicConn) drain_flow_control_raises(now u64, mut result PollResult) ! 
 			recv_window.mark_advertised(new_limit)
 		}
 	}
+}
+
+// drain_pending_new_connection_ids replenishes this endpoint's own issued
+// connection ID set (LocalConnectionIdSet, active_connection_id_set.v) up
+// to the peer's advertised active_connection_id_limit (RFC 9000 §5.1.1: "An
+// endpoint SHOULD ensure that its peer has a sufficient number of available
+// and unused connection IDs"). Each new CID's own bytes MUST be
+// crypto-random (RFC 9000 §9.5's unlinkability requirement -- deliberately
+// crypto.rand here, not the plain `rand` module conn.v's OTHER, pre-14b,
+// pre-existing scid/dcid/client_random generation still (as of this
+// branch) uses; that gap is already tracked and fixed separately upstream,
+// see PROGRESS.md's Phase 14b entry -- not repeated in NEW code written
+// for this phase). retire_prior_to is always sent as 0: this endpoint
+// never proactively asks the peer to retire an already-issued CID of its
+// own (self-initiated CID rotation is a stretch beyond 14b's own stated
+// scope, not a blocker for it).
+fn (mut c QuicConn) drain_pending_new_connection_ids(now u64, mut result PollResult) ! {
+	for c.local_cid_set.active_count() < c.peer_active_connection_id_limit {
+		cid := csrand.bytes(local_cid_len)!
+		token := csrand.bytes(16)!
+		seq := c.local_cid_set.issue_next(cid, token)
+		frame := encode_new_connection_id_frame(seq, 0, cid, token)!
+		datagram := c.build_one_rtt_packet(frame, true, now)!
+		result.outgoing << datagram
+	}
+}
+
+// drain_pending_retire_connection_ids sends a RETIRE_CONNECTION_ID for
+// every peer-issued sequence number PeerConnectionIdSet.note_new_connection_id
+// queued (a retire_prior_to bump the peer sent advanced past a sequence
+// this endpoint was still holding, RFC 9000 §5.1.2).
+fn (mut c QuicConn) drain_pending_retire_connection_ids(now u64, mut result PollResult) ! {
+	for seq in c.pending_retire_connection_ids {
+		frame := encode_retire_connection_id_frame(seq)!
+		datagram := c.build_one_rtt_packet(frame, true, now)!
+		result.outgoing << datagram
+	}
+	c.pending_retire_connection_ids = []u64{}
 }
 
 fn (mut c QuicConn) build_ack_frame_for(space QuicPacketNumberSpace) ![]u8 {
