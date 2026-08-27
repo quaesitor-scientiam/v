@@ -1523,12 +1523,58 @@ own closing note flagged as "the" deferred follow-up, not an arbitrary pick.
       else arm and `frame_is_ack_eliciting`'s existing `else { true }`
       were both checked against RFC 9000 Table 3/§13.2.1 and already
       handle both frame types correctly -- neither needed a change.
-- [ ] **14b** — Active connection ID set: issue local CIDs via
-      NEW_CONNECTION_ID up to the peer's `active_connection_id_limit`;
-      consume the peer's issued CIDs into a pool this endpoint can migrate
-      to; send/receive RETIRE_CONNECTION_ID; enforce
-      `CONNECTION_ID_LIMIT_ERROR`. Update `conn.v`'s stale module doc
-      comment in the same change.
+- [x] **14b** — Active connection ID set (`active_connection_id_set.v`, new
+      file): `LocalConnectionIdSet`/`PeerConnectionIdSet`, two pure
+      accounting types mirroring `anti_amplification.v`'s own shape.
+      `drain_pending_new_connection_ids` issues local CIDs via
+      NEW_CONNECTION_ID up to the peer's `active_connection_id_limit`
+      (crypto-random bytes, RFC 9000 §9.5); the `NewConnectionIdFrame`
+      dispatch arm consumes the peer's issued CIDs into a pool this
+      endpoint could migrate to, enforcing RFC 9000 §19.15's
+      same-sequence-different-cid rejection and §5.1.1's
+      `CONNECTION_ID_LIMIT_ERROR`; retire_prior_to bumps queue
+      RETIRE_CONNECTION_ID sends, drained the same queue-now-drain-later
+      way every other pending frame in `conn.v` already is; the
+      `RetireConnectionIdFrame` arm enforces §19.16's never-issued-sequence
+      PROTOCOL_VIOLATION. `conn.v`'s stale module doc comment updated.
+      Also records every peer-issued CID's stateless-reset token (not just
+      sequence 0's), a real completeness gap this phase's own new code path
+      made trivial to close alongside it.
+
+      Two rounds of adversarial testing before commit (unit tests on the
+      pure types, dispatch-level tests injecting real frames, then a real
+      bidirectional dial()/accept() integration test proving the wire round
+      trip end to end -- both sides' issued/received CID sets agree, both
+      sides' stateless-reset tokens are recognized) found and fixed one
+      real bug and hardened one real gap, both via this phase's own
+      `/vreview high` pass (2026-08-27, see the QUIC conformance matrix's
+      new §5.1 section for the full write-up):
+      (1) `process_one_rtt_packet`'s DCID check compared only against
+      `c.scid`, silently dropping every packet addressed to a newly-issued
+      local CID -- making CID issuance functionally pointless even for a
+      single connection with no listener/routing concern involved at all.
+      Reproduced (reverted the fix, confirmed the new regression test
+      failed against the buggy code, restored) before committing the fix:
+      broadened to `LocalConnectionIdSet.contains()`. (2) No floor stopped
+      a peer from retiring every locally-issued CID down to zero (the
+      RFC 9000 §19.16 exact per-packet protection against this is itself a
+      documented, deliberate scope limit below, since it needs packet-header
+      plumbing this call chain doesn't have) -- `LocalConnectionIdSet.retire`
+      now refuses a retirement that would leave zero active entries,
+      closing the realistic consequence without needing the exact
+      per-packet check.
+
+      Deliberate scope limits, not oversights (see `active_connection_id_
+      set.v`'s own module doc comment): this endpoint's own newly-issued
+      local CIDs ARE already accepted for incoming 1-RTT packets (the fix
+      above), but for a SERVER specifically, `QuicListener`'s multi-connection
+      routing table is still keyed only by each connection's original
+      `scid` -- registering the rest there too is Phase 14d's job. The
+      exact RFC 9000 §19.16 "not the current packet's own DCID" check
+      remains unimplemented (broader floor above covers its worst
+      consequence, not the literal requirement). Self-initiated CID
+      rotation for privacy is not implemented (`retire_prior_to` is always
+      sent as 0) -- a stretch beyond this phase's own stated scope.
 - [ ] **14c** — Path validation state machine: detect a new remote address
       on an established connection (distinguish probing-only traffic —
       simple NAT rebinding, RFC 9000 §9.3 — from an intentional migration);
