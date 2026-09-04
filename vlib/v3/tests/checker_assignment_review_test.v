@@ -61,35 +61,94 @@ fn main() {
 	}
 }
 ',
-		'unknown field `foo`')
+		'field `foo` does not exist')
 }
 
-fn test_reject_container_stored_capturing_fn_literals() {
+fn test_optional_assignment_keeps_wrapper_and_qualified_optional_cast_is_known() {
 	v3_bin := checker_assignment_build_v3()
-	checker_assignment_run_bad(v3_bin, 'bad_append_alias_capturing_fn_literal', 'fn main() {
+	out := checker_assignment_run_good(v3_bin, 'optional_assignment_and_qualified_cast', 'import time
+
+type Values = []int
+
+struct Holder {
+	value  ?time.Time
+	values ?Values
+}
+
+fn main() {
+	mut first := ?int(none)
+	mut second := ?int(none)
+	first = 1
+	second = 2
+	assert first? == 1
+	assert second? == 2
+	copy := first
+	assert copy? == first?
+	holder := Holder{}
+	casted := holder.value as ?time.Time
+	assert casted == none
+	if holder.values != none {
+		assert holder.values ?.str() == "Values([])"
+	}
+	mut absent := ?map[string]string{}
+	fallback := {
+		"foo": "bar"
+	}
+	chosen := if absent != none { absent.clone() } else { fallback }
+	assert absent == none
+	assert chosen.len == 1
+	println("ok")
+}
+')
+	assert out == 'ok'
+}
+
+fn test_enum_alias_cast_contextualizes_short_enum_value() {
+	v3_bin := checker_assignment_build_v3()
+	out := checker_assignment_run_good(v3_bin, 'enum_alias_short_value_cast', 'enum Number {
+	one = 1
+	two
+}
+
+type NumberAlias = Number
+
+fn main() {
+	value := NumberAlias(.two)
+	assert value == .two
+	println(value)
+}
+')
+	assert out == 'two'
+}
+
+fn test_container_stored_capturing_fn_literals() {
+	v3_bin := checker_assignment_build_v3()
+	alias_out := checker_assignment_run_good(v3_bin, 'append_alias_capturing_fn_literal', 'fn main() {
 	x := 1
 	f := fn [x] () int {
 		return x
 	}
 	mut callbacks := []fn () int{}
 	callbacks << f
+	println(int_str(callbacks[0]()))
 }
-',
-		'capturing fn literal cannot be stored in a container')
-	checker_assignment_run_bad(v3_bin, 'bad_append_direct_capturing_fn_literal', 'fn main() {
+')
+	assert alias_out == '1'
+	direct_out := checker_assignment_run_good(v3_bin, 'append_direct_capturing_fn_literal', 'fn main() {
 	x := 1
 	mut callbacks := []fn () int{}
 	callbacks << fn [x] () int {
 		return x
 	}
+	println(int_str(callbacks[0]()))
 }
-',
-		'capturing fn literal cannot be stored in a container')
+')
+	assert direct_out == '1'
 }
 
-fn test_reject_nonlocal_assigned_capturing_fn_literals() {
+fn test_nonlocal_assigned_capturing_fn_literals() {
 	v3_bin := checker_assignment_build_v3()
-	checker_assignment_run_bad(v3_bin, 'bad_field_assign_direct_capturing_fn_literal', 'struct Holder {
+	direct_out := checker_assignment_run_good(v3_bin, 'field_assign_direct_capturing_fn_literal', 'struct Holder {
 mut:
 	cb fn () int
 }
@@ -106,10 +165,11 @@ fn main() {
 	holder.cb = fn [x] () int {
 		return x
 	}
+	println(int_str(holder.cb()))
 }
-',
-		'capturing fn literal cannot be stored or returned')
-	checker_assignment_run_bad(v3_bin, 'bad_field_assign_alias_capturing_fn_literal', 'struct Holder {
+')
+	assert direct_out == '1'
+	alias_out := checker_assignment_run_good(v3_bin, 'field_assign_alias_capturing_fn_literal', 'struct Holder {
 mut:
 	cb fn () int
 }
@@ -127,10 +187,11 @@ fn main() {
 		cb: plain
 	}
 	holder.cb = f
+	println(int_str(holder.cb()))
 }
-',
-		'capturing fn literal cannot be stored or returned')
-	checker_assignment_run_bad(v3_bin, 'bad_index_assign_capturing_fn_literal', 'fn plain() int {
+')
+	assert alias_out == '1'
+	index_out := checker_assignment_run_good(v3_bin, 'index_assign_capturing_fn_literal', 'fn plain() int {
 	return 0
 }
 
@@ -140,9 +201,10 @@ fn main() {
 	callbacks[0] = fn [x] () int {
 		return x
 	}
+	println(int_str(callbacks[0]()))
 }
-',
-		'capturing fn literal cannot be stored in a container')
+')
+	assert index_out == '1'
 }
 
 fn test_shadowed_capturing_fn_literal_marker_uses_nearest_binding() {
@@ -167,7 +229,8 @@ fn main() {
 }
 ')
 	assert out == 'ok'
-	checker_assignment_run_bad(v3_bin, 'capturing_fn_literal_outer_marker_survives_shadow', 'fn plain() int {
+	outer_out := checker_assignment_run_good(v3_bin,
+		'capturing_fn_literal_outer_marker_survives_shadow', 'fn plain() int {
 	return 2
 }
 
@@ -182,7 +245,10 @@ fn main() {
 		callbacks << f
 	}
 	callbacks << f
+	assert callbacks[0]() == 2
+	assert callbacks[1]() == 1
+	println("ok")
 }
-',
-		'capturing fn literal cannot be stored in a container')
+')
+	assert outer_out == 'ok'
 }

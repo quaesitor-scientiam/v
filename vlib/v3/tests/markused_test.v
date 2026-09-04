@@ -16,15 +16,25 @@ const v3_src = os.join_path(v3_dir, 'v3.v')
 
 // parse_checked_source reads parse checked source input for v3 tests.
 fn parse_checked_source(name string, source string) (&flat.FlatAst, &types.TypeChecker) {
+	return parse_checked_source_with_unknown_calls(name, source, true)
+}
+
+fn parse_checked_source_with_unknown_calls(name string, source string, diagnose_unknown_calls bool) (&flat.FlatAst, &types.TypeChecker) {
 	src := os.join_path(os.temp_dir(), 'v3_markused_${name}.v')
 	os.write_file(src, source) or { panic(err) }
 	prefs := pref.new_preferences()
 	mut p := parser.Parser.new(prefs)
 	mut a := p.parse_file(src)
 	mut tc := types.TypeChecker.new(a)
+	tc.enable_globals = true
 	tc.collect(a)
-	tc.diagnose_unknown_calls = true
-	tc.diagnostic_files[src] = true
+	tc.enable_globals = true
+	tc.diagnose_unknown_calls = diagnose_unknown_calls
+	if diagnose_unknown_calls {
+		tc.diagnostic_files[src] = true
+	} else {
+		tc.diagnostic_files['__external_import_fixture__'] = true
+	}
 	tc.check_semantics()
 	assert tc.errors.len == 0, tc.errors.str()
 	return a, &tc
@@ -56,7 +66,9 @@ fn parse_checked_project(name string, files map[string]string, main_file string)
 	mut p := parser.Parser.new(prefs)
 	mut a := p.parse_files(paths)
 	mut tc := types.TypeChecker.new(a)
+	tc.enable_globals = true
 	tc.collect(a)
+	tc.enable_globals = true
 	tc.diagnose_unknown_calls = true
 	for path in paths {
 		tc.diagnostic_files[path] = true
@@ -80,7 +92,9 @@ fn parse_checked_project_in_order(name string, rels []string, sources []string) 
 	mut p := parser.Parser.new(prefs)
 	mut a := p.parse_files(paths)
 	mut tc := types.TypeChecker.new(a)
+	tc.enable_globals = true
 	tc.collect(a)
+	tc.enable_globals = true
 	tc.diagnose_unknown_calls = true
 	for path in paths {
 		tc.diagnostic_files[path] = true
@@ -105,6 +119,7 @@ fn test_trivial_literal_output_prunes_conservative_runtime_helper_seeds() {
 	assert !used['i64.str']
 	assert !used['map.clone']
 	assert !used['strconv.format_uint']
+	assert used['string.free']
 }
 
 fn test_nontrivial_output_keeps_conservative_runtime_helper_seeds() {
@@ -119,6 +134,19 @@ println(message())
 	assert used['strconv.format_uint']
 	assert used['array.delete_last']
 	assert used['i64.str']
+	assert used['v3.pref.detect_vroot']
+	assert used['v3.pref.detect_vexe']
+}
+
+fn test_cached_trivial_output_keeps_cached_runtime_helper_seeds() {
+	a, tc := parse_checked_source('cached_trivial_output', "println('Hello, World!')")
+	used := markused.mark_used_for_cache(a, tc, []string{}, {
+		'builtin': true
+	})
+	assert used['__new_array']
+	assert used['array.push']
+	assert used['byteptr.vstring_with_len']
+	assert used['strconv.format_uint']
 }
 
 fn find_fn_node_id(a &flat.FlatAst, name string) int {
@@ -196,6 +224,43 @@ pub fn make() Box {
 	assert used['left.make']
 	assert !used['right.make']
 	assert uses_generics
+}
+
+fn test_module_function_owner_uses_qualified_declaration_key() {
+	a, tc := parse_checked_project_in_order('qualified_function_owner', [
+		'main/main.v',
+		'builtin/compat.v',
+		'support/support.v',
+	], [
+		'module main
+
+import support
+
+fn main() {
+	_ := support.decode()
+}
+',
+		'module builtin
+
+fn decode() int {
+	return 0
+}
+',
+		'module support
+
+pub fn decode() int {
+	return helper()
+}
+
+fn helper() int {
+	return 1
+}
+',
+	])
+	used := markused.mark_used_without_generic_detection(a, tc)
+	assert used['support.decode']
+	assert used['support.helper']
+	assert !used['builtin.decode']
 }
 
 // test_eager_markused_import_alias_context_is_file_local covers the eager,
@@ -331,6 +396,76 @@ fn main() {
 }
 ')
 	assert used['new_map']
+}
+
+// test_prepared_markused_scans_runtime_helpers_after_semantic_check validates
+// that declaration preparation never captures incomplete semantic results.
+fn test_prepared_markused_scans_runtime_helpers_after_semantic_check() {
+	src := os.join_path(os.temp_dir(), 'v3_markused_prepared_runtime_helpers.v')
+	os.write_file(src, '
+fn maybe_map() ?map[string]int {
+	return none
+}
+
+fn main() {
+	m := maybe_map() or { return }
+	_ := m
+}
+') or {
+		panic(err)
+	}
+	prefs := pref.new_preferences()
+	mut p := parser.Parser.new(prefs)
+	mut a := p.parse_file(src)
+	mut tc := types.TypeChecker.new(a)
+	tc.enable_globals = true
+	tc.collect(a)
+	tc.diagnostic_files[src] = true
+	prepared_thread := spawn markused.prepare_markused_declarations(a, &tc, true)
+	tc.check_semantics()
+	assert tc.errors.len == 0, tc.errors.str()
+	mut prepared := prepared_thread.wait()
+	used := markused.mark_used_without_generic_detection_prepared(a, &tc, mut prepared)
+	prepared.release()
+	assert used['new_map']
+}
+
+fn test_prepared_markused_combines_exact_and_lowered_dependencies() {
+	src := os.join_path(os.temp_dir(), 'v3_markused_prepared_exact_edges.v')
+	os.write_file(src, '
+fn direct_target() {}
+fn callback_target() {}
+fn take_callback(callback fn ()) { callback() }
+fn default_target() int { return 1 }
+
+struct Config {
+	value int = default_target()
+}
+
+fn main() {
+	direct_target()
+	take_callback(callback_target)
+	_ := Config{}
+}
+') or {
+		panic(err)
+	}
+	prefs := pref.new_preferences()
+	mut p := parser.Parser.new(prefs)
+	mut a := p.parse_file(src)
+	mut tc := types.TypeChecker.new(a)
+	tc.enable_globals = true
+	tc.collect(a)
+	tc.diagnostic_files[src] = true
+	prepared_thread := spawn markused.prepare_markused_declarations(a, &tc, true)
+	tc.check_semantics()
+	assert tc.errors.len == 0, tc.errors.str()
+	mut prepared := prepared_thread.wait()
+	used := markused.mark_used_without_generic_detection_prepared(a, &tc, mut prepared)
+	prepared.release()
+	assert used['direct_target']
+	assert used['callback_target']
+	assert used['default_target']
 }
 
 fn test_self_typed_default_collects_explicit_initializer_calls() {
@@ -803,6 +938,62 @@ fn main() {
 	assert used['Builder.main_module_name']
 }
 
+fn test_nested_field_receiver_method_does_not_root_same_suffix_methods() {
+	used := mark_used_source('nested_field_receiver_method', '
+struct Flags {}
+
+fn (mut flags Flags) set() {}
+
+struct Holder {
+mut:
+	flags Flags
+}
+
+struct Unrelated {}
+
+fn (mut item Unrelated) set() {}
+
+fn (mut holder Holder) update() {
+	holder.flags.set()
+}
+
+fn main() {
+	mut holder := Holder{}
+	holder.update()
+}
+')
+	assert used['Flags.set']
+	assert !used['Unrelated.set']
+}
+
+fn test_nested_flag_enum_intrinsic_does_not_root_same_suffix_methods() {
+	used := mark_used_source('nested_flag_enum_intrinsic', '
+@[flag]
+enum Flags {
+	active
+}
+
+struct Holder {
+mut:
+	flags Flags
+}
+
+struct Unrelated {}
+
+fn (mut item Unrelated) set(flag Flags) {}
+
+fn (mut holder Holder) update() {
+	holder.flags.set(.active)
+}
+
+fn main() {
+	mut holder := Holder{}
+	holder.update()
+}
+')
+	assert !used['Unrelated.set']
+}
+
 fn test_unreachable_interface_implementer_method_is_not_rooted() {
 	used := mark_used_source('unreachable_interface_implementer', '
 interface Reader {
@@ -1243,7 +1434,7 @@ fn test_reachable_main_fn_literal_is_emitted_after_used_filter_transform() {
 	tc.annotate_types()
 	mut g := cgen.FlatGen.new()
 	c_code := g.gen_with_used_options(a, used, tc, true)
-	assert c_code.contains('int __anon_fn_')
+	assert c_code.contains('i64 __anon_fn_')
 	assert c_code.contains('callback_value(__anon_fn_')
 }
 
@@ -1266,7 +1457,7 @@ fn test_reachable_imported_fn_literal_roots_private_callback_helpers() {
 
 fn test_top_level_fn_value_roots_helper() {
 	mut a, mut tc := parse_checked_source('top_level_fn_value_helper_cgen',
-		'module main\n\nfn helper() int {\n\treturn 41\n}\n\nf := helper\nprintln(int_str(f() + 1))\n')
+		'module main\n\nfn helper() int {\n\treturn 41\n}\n\nf := helper\n_ = f()\n')
 	mut used := markused.mark_used(a, tc)
 	assert used['helper']
 	used = transform.transform_with_used(mut a, tc, used)
@@ -1289,11 +1480,11 @@ fn helper() int {
 }
 
 f := helper
-println(int_str(f() + 1))
+println(f() + 1)
 ') or {
 		panic(err)
 	}
-	compile := os.execute('${v3_bin} -o ${bin} ${src}')
+	compile := os.execute('${v3_bin} -b c -o ${bin} ${src}')
 	assert compile.exit_code == 0, compile.output
 	run := os.execute(bin)
 	assert run.exit_code == 0, run.output
@@ -1412,7 +1603,7 @@ fn helper() int {
 
 helper := 10
 f := helper
-println(int_str(f))
+_ = f
 ')
 	assert !used['helper']
 }
@@ -1499,7 +1690,7 @@ fn used() int {
 
 fn main() {
 	unused := used
-	println(unused())
+	println((unused)())
 }
 ')
 	mut used := markused.mark_used(a, tc)
@@ -1570,7 +1761,7 @@ fn main() {
 	tc.annotate_types()
 	mut g := cgen.FlatGen.new()
 	c_code := g.gen_with_used_options(a, used, tc, true)
-	assert c_code.contains('new_map(sizeof(string), sizeof(int)')
+	assert c_code.contains('new_map(sizeof(string), sizeof(i64)')
 }
 
 // test_optional_map_or_lowers_to_new_map_after_used_filter_transform
@@ -1594,7 +1785,7 @@ fn main() {
 	tc.annotate_types()
 	mut g := cgen.FlatGen.new()
 	c_code := g.gen_with_used_options(a, used, tc, true)
-	assert c_code.contains('new_map(sizeof(string), sizeof(int)')
+	assert c_code.contains('new_map(sizeof(string), sizeof(i64)')
 }
 
 // test_string_membership_lowers_to_contains_after_used_filter_transform
@@ -1670,7 +1861,7 @@ fn main() {
 		ratio:  1.25
 		ch:     `x`
 		nums:   [3, 4]
-		lookup: {
+		lookup: map[string]u64{
 			"a": u64(5)
 		}
 		inner:  Inner{
@@ -1696,7 +1887,7 @@ fn main() {
 }
 
 fn test_json_encode_fast_path_seeds_generated_helpers() {
-	mut a, mut tc := parse_checked_source('json_encode_fast_path_helpers', '
+	mut a, mut tc := parse_checked_source_with_unknown_calls('json_encode_fast_path_helpers', '
 import json
 
 struct Payload {
@@ -1710,7 +1901,8 @@ fn main() {
 		score: 1.5
 	})
 }
-')
+',
+		false)
 	mut used := markused.mark_used(a, tc)
 	for helper in ['string__plus', 'i64__str', 'f64__str'] {
 		assert used[helper], helper

@@ -221,6 +221,46 @@ const skip_on_ubuntu_musl = [
 	'cmd/tools/fast/bench_test.v', // parsing-only test compiles fast's main package, pulling db.sqlite and the host glibc .pc/header (sys/cdefs.h)
 	'vlib/arrays/parallel/parallel_test.v',
 	'vlib/builtin/js/array_test.js.v',
+	// crypto.ecdsa (and net.quic, which imports it -- added for
+	// https://github.com/vlang/v/issues/27675) needs Ubuntu's system
+	// OpenSSL dev headers, which are built against glibc. Fixing the -I
+	// flag (ecdsa.c.v was pointing one directory too deep, `.../openssl`
+	// instead of `.../include` -- masked everywhere else by /usr/include
+	// being on every other compiler's implicit default search path, which
+	// musl-gcc's -nostdinc removes) only gets past the __has_include()
+	// check; the actual headers then transitively pull in glibc's own
+	// <stdio.h>/<time.h>/<limits.h>, which conflict at the type level
+	// with musl's parallel headers already active via musl-gcc's own
+	// -isystem wrapper (confirmed directly: __gnuc_va_list/__time64_t
+	// undefined, va_list/__BYTE_ORDER redefined incompatibly). Same root
+	// cause as the pg/sqlite entry below -- a glibc-targeted dev package
+	// is not usable from a musl-gcc build without a musl-native OpenSSL.
+	// Add any NEW net.quic/crypto.ecdsa test file here too.
+	'vlib/crypto/ecdsa/ecdsa_p256_ecdh_test.v',
+	'vlib/net/quic/coalesce_test.v',
+	'vlib/net/quic/crypto_stream_test.v',
+	'vlib/net/quic/frame_test.v',
+	'vlib/net/quic/handshake_confirm_test.v',
+	'vlib/net/quic/header_protection_test.v',
+	'vlib/net/quic/header_test.v',
+	'vlib/net/quic/initial_exchange_test.v',
+	'vlib/net/quic/initial_secrets_test.v',
+	'vlib/net/quic/key_update_test.v',
+	'vlib/net/quic/packet_number_space_test.v',
+	'vlib/net/quic/packet_number_test.v',
+	'vlib/net/quic/packet_protection_test.v',
+	'vlib/net/quic/retry_test.v',
+	'vlib/net/quic/tls13_certificate_chain_test.v',
+	'vlib/net/quic/tls13_certificate_test.v',
+	'vlib/net/quic/tls13_client_hello_test.v',
+	'vlib/net/quic/tls13_handshake_test.v',
+	'vlib/net/quic/tls13_keyschedule_test.v',
+	'vlib/net/quic/tls13_messages_test.v',
+	'vlib/net/quic/tls13_quiche_vector_test.v',
+	'vlib/net/quic/tls13_server_hello_test.v',
+	'vlib/net/quic/transport_parameters_test.v',
+	'vlib/net/quic/varint_test.v', // pure V, no OpenSSL of its own -- but V compiles net.quic as one package, so a sibling file's #include failure still fails this file's build
+	'vlib/net/quic/version_negotiation_test.v',
 	'vlib/db/pg_sqlite_consistency_test.v', // pg + sqlite dev headers pull in glibc-only sys/cdefs.h on musl-gcc
 	'vlib/db/sqlite/sqlite_test.v',
 	'vlib/db/sqlite/sqlite_orm_test.v',
@@ -230,6 +270,12 @@ const skip_on_ubuntu_musl = [
 	'vlib/db/sqlite/sqlite_f32_test.v',
 	'vlib/gg/draw_rect_empty_test.v', // sokol.sapp needs X11/Xlib.h, not installed in the musl Docker image
 	'vlib/gg/text_rendering_test.v',
+	'vlib/gg/multiwindow_render_runtime_contract_test.v', // same sokol.sapp/X11/Xlib.h gap as the two entries above
+	'vlib/gg/multiwindow_services_contract_test.v',
+	'vlib/gg/multiwindow_gl_readback_helpers_d_gg_multiwindow_test.v',
+	'vlib/gg/multiwindow_wayland_services_d_gg_multiwindow_test.v',
+	'vlib/x/multiwindow/service_native_win32_no_flag_test.v',
+	'vlib/sokol/gfx/metal_private_hook_contract_test.v',
 	'vlib/orm/orm_test.v',
 	'vlib/orm/orm_sql_or_blocks_test.v',
 	'vlib/orm/orm_create_and_drop_test.v',
@@ -254,6 +300,7 @@ const skip_on_ubuntu_musl = [
 	'vlib/orm/orm_serial_attribute_test.v',
 	'vlib/orm/orm_option_subselect_test.v',
 	'vlib/orm/orm_func_test.v',
+	'vlib/orm/orm_module_table_prefix/orm_module_table_prefix_test.v',
 	'vlib/orm/orm_where_in_test.v',
 	'vlib/sokol/gfx/gfx_test.v', // sokol_app.h needs GL/gl.h, not installed in the musl Docker image
 	'vlib/v/gen/c/sql_assert_temp_var_test.v', // sqlite header dependency pulls in glibc sys/cdefs.h on musl-gcc

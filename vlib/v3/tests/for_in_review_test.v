@@ -59,7 +59,7 @@ fn test_pointer_conditions_reject_plain_if_and_for() {
 	v3_bin := build_v3_for_in_review()
 	for_in_review_run_bad(v3_bin, 'pointer_if_condition',
 		'fn main() {\n\tx := 1\n\tp := &x\n\tif p {\n\t\tprintln("bad")\n\t}\n}\n',
-		'if condition must be `bool`, not `&int`')
+		'non-bool type `&int` used as if condition')
 	for_in_review_run_bad(v3_bin, 'pointer_for_condition',
 		'fn main() {\n\tx := 1\n\tp := &x\n\tfor p {\n\t\tbreak\n\t}\n}\n',
 		'if condition must be `bool`, not `&int`')
@@ -83,5 +83,19 @@ fn test_optional_map_for_in_is_rejected_before_codegen() {
 	v3_bin := build_v3_for_in_review()
 	for_in_review_run_bad(v3_bin, 'optional_map_for_in',
 		'fn maybe_values() ?map[string]int {\n\treturn none\n}\n\nfn main() {\n\tfor key, value in maybe_values() {\n\t\tprintln(key + int_str(value))\n\t}\n}\n',
-		'cannot iterate over `?map[string]int`')
+		'for in: cannot index `?map[string]int`')
+}
+
+fn test_values_copied_from_temporary_map_remain_valid() {
+	v3_bin := build_v3_for_in_review()
+	out := for_in_review_run_good(v3_bin, 'temporary_map_for_in_value_lifetime',
+		"fn entries(lang string) map[string]string {\n\treturn {'message': lang.repeat(64)}\n}\n\nfn main() {\n\tmut translations := map[string]map[string]string{}\n\tfor lang in ['en', 'fr', 'de', 'es'] {\n\t\tfor key, value in entries(lang) {\n\t\t\ttranslations[lang][key] = value\n\t\t}\n\t}\n\tprintln(translations['en']['message'] == 'en'.repeat(64))\n}\n")
+	assert out == 'true'
+}
+
+fn test_custom_iterator_pointer_for_in_uses_single_indirection() {
+	v3_bin := build_v3_for_in_review()
+	out := for_in_review_run_good(v3_bin, 'custom_iterator_pointer',
+		'struct Counter {\nmut:\n\tn int\n}\n\nfn (mut c Counter) next() ?int {\n\tif c.n >= 3 {\n\t\treturn none\n\t}\n\tc.n++\n\treturn c.n\n}\n\nfn main() {\n\tmut c := Counter{}\n\tfor x in &c {\n\t\tprintln(x)\n\t}\n\tprintln("count: \${c.n}")\n}\n')
+	assert out == '1\n2\n3\ncount: 3'
 }

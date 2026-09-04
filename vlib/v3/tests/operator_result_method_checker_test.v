@@ -135,7 +135,7 @@ fn main() {
 '
 	bad_res := check_to_c(v3_bin, 'bad', bad)
 	assert bad_res.exit_code != 0, bad_res.output
-	assert bad_res.output.contains('unknown function'), bad_res.output
+	assert bad_res.output.contains('unknown method or field: `Span.bogus_method`'), bad_res.output
 	assert bad_res.output.contains('bogus_method'), bad_res.output
 }
 
@@ -158,4 +158,22 @@ fn main() {
 }
 ")
 	assert out == 'ok'
+}
+
+fn test_named_eq_method_does_not_replace_struct_equality() {
+	v3_bin := build_v3()
+	out := run_standalone(v3_bin, 'named_eq_method', 'struct Rectangle {
+	x int
+}
+
+fn (r Rectangle) eq(s Rectangle) bool {
+	return r == s
+}
+
+fn main() {
+	println(Rectangle{x: 1}.eq(Rectangle{x: 1}))
+	println(Rectangle{x: 1}.eq(Rectangle{x: 2}))
+}
+')
+	assert out == 'true\nfalse'
 }

@@ -8,7 +8,9 @@ const for_multi_init_v3_src = os.join_path(for_multi_init_v3_dir, 'v3.v')
 
 fn for_multi_init_build_v3() string {
 	v3_bin := os.join_path(os.temp_dir(), 'v3_for_multi_init_test_${os.getpid()}')
-	os.rm(v3_bin) or {}
+	if os.is_executable(v3_bin) {
+		return v3_bin
+	}
 	build :=
 		os.execute('${for_multi_init_vexe} -gc none -path "${for_multi_init_vlib_dir}|@vlib|@vmodules" -o ${v3_bin} ${for_multi_init_v3_src}')
 	assert build.exit_code == 0, build.output
@@ -105,19 +107,24 @@ fn main() {
 fn test_unsigned_inclusive_for_bound_evaluates_once_per_iteration() {
 	v3_bin := for_multi_init_build_v3()
 	src := os.join_path(os.temp_dir(), 'v3_for_unsigned_inclusive_bound_${os.getpid()}.v')
-	os.write_file(src, 'fn next_bound(mut calls int) u8 {
-	calls++
+	os.write_file(src, 'struct Calls {
+mut:
+	value int
+}
+
+fn next_bound(mut calls Calls) u8 {
+	calls.value++
 	return u8(2)
 }
 
 fn main() {
-	mut calls := 0
+	mut calls := Calls{}
 	mut sum := 0
 	for i := u8(0); i <= next_bound(mut calls); i++ {
 		sum += int(i)
 	}
 	assert sum == 3
-	assert calls == 4
+	assert calls.value == 4
 	println("ok")
 }
 ') or {
@@ -244,13 +251,18 @@ fn test_labeled_c_style_for_multi_init_flow_targets_named_loop() {
 fn test_c_style_for_post_labeled_continue_runs_post_once_for_same_loop() {
 	v3_bin := for_multi_init_build_v3()
 	src := os.join_path(os.temp_dir(), 'v3_for_post_labeled_continue_${os.getpid()}.v')
-	os.write_file(src, 'fn step(mut posts int, a int, b int) (int, int) {
-	posts++
+	os.write_file(src, 'struct Posts {
+mut:
+	value int
+}
+
+fn step(mut posts Posts, a int, b int) (int, int) {
+	posts.value++
 	return a + 1, b + 1
 }
 
 fn main() {
-	mut posts := 0
+	mut posts := Posts{}
 	mut a := 0
 	mut b := 0
 	mut hits := 0
@@ -263,7 +275,7 @@ fn main() {
 	assert a == 3
 	assert b == 3
 	assert hits == 3
-	assert posts == 3
+	assert posts.value == 3
 	println("ok")
 }
 ') or {
@@ -285,13 +297,18 @@ fn main() {
 fn test_c_style_for_post_labeled_continue_to_outer_skips_inner_post() {
 	v3_bin := for_multi_init_build_v3()
 	src := os.join_path(os.temp_dir(), 'v3_for_post_outer_labeled_continue_${os.getpid()}.v')
-	os.write_file(src, 'fn step(mut posts int, a int, b int) (int, int) {
-	posts++
+	os.write_file(src, 'struct Posts {
+mut:
+	value int
+}
+
+fn step(mut posts Posts, a int, b int) (int, int) {
+	posts.value++
 	return a + 1, b + 1
 }
 
 fn main() {
-	mut inner_posts := 0
+	mut inner_posts := Posts{}
 	mut outer := 0
 	mut hits := 0
 	outer_loop: for ; outer < 2; outer++ {
@@ -304,7 +321,7 @@ fn main() {
 	}
 	assert outer == 2
 	assert hits == 2
-	assert inner_posts == 0
+	assert inner_posts.value == 0
 	println("ok")
 }
 ') or {
@@ -337,7 +354,7 @@ fn main() {
 	}
 }
 ',
-		'for init assignment mismatch: 2 variables but 3 values')
+		'multi-return assignment mismatch: 3 variables but `int` has 1 values')
 }
 
 fn test_c_style_for_multi_init_allows_multi_return_call() {
@@ -595,7 +612,7 @@ fn main() {
 	}
 }
 ',
-		'unknown field `foo`')
+		'field `foo` does not exist or have the same type in these sumtype `Value` variants')
 }
 
 fn test_c_style_for_multi_init_allows_selector_lhs_after_comma() {
@@ -645,7 +662,7 @@ fn test_c_style_for_multi_init_rejects_missing_rhs() {
 	}
 }
 ',
-		'for init assignment mismatch: 2 variables but 1 values')
+		'multi-return assignment mismatch: 2 variables but `int` has 1 values')
 }
 
 fn test_for_in_rejects_selector_value_var_after_comma() {
