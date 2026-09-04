@@ -427,6 +427,8 @@ mut:
 	preinclude_header_owned        []CHeaderOwnershipDirective
 	header_owned_pragma_once_seen  map[string]bool
 	header_owned_macro_context     CHeaderOwnedMacroContext
+	header_owned_initial_macro_key string
+	header_owned_initial_macros    CHeaderMacroState
 	preinclude_directives          []string
 	postinclude_directives         []string
 	early_c_source_directives      map[string]bool
@@ -502,6 +504,8 @@ mut:
 	decl_attrs                    map[int][]string
 	decl_attrs_by_source_position map[u64][]string
 	c_decl_abi_names              map[string]string
+	export_c_abi_decls            map[string]flat.NodeId
+	main_export_owners            map[string][]string
 	c_extern_global_names         map[string]string
 	shared_type_names             map[string]SharedTypeInfo // __shared__ wrapper name -> wrapped type metadata
 	shared_alias_pointer_shorts   map[string]string // alias short name -> shared inner type; '' means ambiguous
@@ -1220,6 +1224,8 @@ pub fn FlatGen.new() FlatGen {
 		decl_attrs: map[int][]string{}
 		decl_attrs_by_source_position: map[u64][]string{}
 		c_decl_abi_names: map[string]string{}
+		export_c_abi_decls: map[string]flat.NodeId{}
+		main_export_owners: map[string][]string{}
 		c_extern_global_names: map[string]string{}
 		shared_type_names: map[string]SharedTypeInfo{}
 		shared_alias_pointer_shorts: map[string]string{}
@@ -2970,6 +2976,8 @@ pub fn (mut g FlatGen) gen_with_used_options(a &flat.FlatAst, used_fns map[strin
 	g.preinclude_header_owned = []CHeaderOwnershipDirective{}
 	g.header_owned_pragma_once_seen.clear()
 	g.header_owned_macro_context = CHeaderOwnedMacroContext{}
+	g.header_owned_initial_macro_key = ''
+	g.header_owned_initial_macros = CHeaderMacroState{}
 	g.preinclude_directives = []string{}
 	g.postinclude_directives = []string{}
 	g.early_c_source_directives.clear()
@@ -3028,6 +3036,8 @@ pub fn (mut g FlatGen) gen_with_used_options(a &flat.FlatAst, used_fns map[strin
 	g.decl_attrs.clear()
 	g.decl_attrs_by_source_position.clear()
 	g.c_decl_abi_names.clear()
+	g.export_c_abi_decls.clear()
+	g.main_export_owners.clear()
 	g.c_extern_global_names.clear()
 	g.shared_type_names.clear()
 	g.shared_alias_pointer_shorts.clear()
@@ -4060,6 +4070,7 @@ fn (mut g FlatGen) collect_gen_info(no_parallel bool) {
 	mut presw := time.new_stopwatch()
 	g.unused_param_seen = &UnusedParamSeen{}
 	g.reserve_collect_gen_info_maps(no_parallel)
+	g.precompute_export_lookups()
 	if profile {
 		g.timing_profile('  [ttime]   ci reserve maps  ${f64(presw.elapsed().microseconds()) / 1000.0:7.2f} ms')
 		presw.restart()
@@ -5155,8 +5166,12 @@ fn (mut g FlatGen) ensure_header_owned_macro_context() {
 	}
 }
 
-fn (g &FlatGen) header_owned_initial_macro_state() CHeaderMacroState {
+fn (mut g FlatGen) header_owned_initial_macro_state() CHeaderMacroState {
 	effective_flags := g.header_owned_effective_c_flags()
+	cache_key := '${g.ccompiler}\x00${g.c99_mode}\x00${g.target.os}\x00${g.target.arch}\x00${g.target.abi}\x00${effective_flags.join('\x00')}'
+	if cache_key == g.header_owned_initial_macro_key {
+		return c_header_macro_state_clone(g.header_owned_initial_macros)
+	}
 	mut state := c_header_macro_state_for_flags(effective_flags)
 	compiler_values := c_header_compiler_predefined_macro_values(g.ccompiler, effective_flags, g.c99_mode, g.target)
 	for name, value in compiler_values {
@@ -5187,6 +5202,8 @@ fn (g &FlatGen) header_owned_initial_macro_state() CHeaderMacroState {
 		state.uncertain.delete(name)
 		state.defined[name] = true
 	}
+	g.header_owned_initial_macro_key = cache_key
+	g.header_owned_initial_macros = c_header_macro_state_clone(state)
 	return state
 }
 
@@ -10909,11 +10926,12 @@ fn c_strip_comments(text string) string {
 }
 
 fn (mut g FlatGen) collect_inlined_c_declared_fns(text string) {
-	g.collect_inlined_c_declarations(text)
+	without_comments := c_strip_comments(text)
+	g.collect_inlined_c_declarations_without_comments(without_comments)
 	// Inlined source text has not gone through the active-branch scanner. Keep
 	// every visible definition conservative, as before; only preserved headers
 	// can use their final preprocessor state to prove that a later #undef wins.
-	for line in c_strip_comments(text).split_into_lines() {
+	for line in without_comments.split_into_lines() {
 		clean := line.trim_space()
 		if clean.len == 0 || clean[0] != `#` || c_directive_name(clean) != 'define' {
 			continue
@@ -10930,11 +10948,15 @@ fn (mut g FlatGen) collect_inlined_c_declared_fns(text string) {
 }
 
 fn (mut g FlatGen) collect_inlined_c_declarations(text string) {
+	g.collect_inlined_c_declarations_without_comments(c_strip_comments(text))
+}
+
+fn (mut g FlatGen) collect_inlined_c_declarations_without_comments(text string) {
 	// Header declarations often span several lines (one parameter per line);
 	// accumulate a pending declaration until its terminating `;` so those are
 	// collected too, not just single-line prototypes.
 	mut pending := ''
-	for line in c_strip_comments(text).split_into_lines() {
+	for line in text.split_into_lines() {
 		clean := line.trim_space()
 		for name in c_macro_declared_fn_names(clean) {
 			g.inlined_c_declared_fns[name] = true
@@ -21286,9 +21308,8 @@ fn (mut g FlatGen) headerless_libc_preamble() {
 	g.writeln('DWORD WINAPI TlsAlloc(void);')
 	g.writeln('void* WINAPI TlsGetValue(DWORD index);')
 	g.writeln('BOOL WINAPI TlsSetValue(DWORD index, void* value);')
-	g.writeln('DWORD WINAPI FlsAlloc(void (WINAPI *callback)(void*));')
-	g.writeln('void* WINAPI FlsGetValue(DWORD index);')
-	g.writeln('BOOL WINAPI FlsSetValue(DWORD index, void* value);')
+	g.writeln('void* WINAPI GetModuleHandleA(const char* module_name);')
+	g.writeln('void* WINAPI GetProcAddress(void* module, const char* proc_name);')
 	g.writeln('typedef struct { HANDLE handle; void* context; } __v_thread;')
 	g.writeln('static bool __v_thread_equal(__v_thread a, __v_thread b) { return a.handle == b.handle; }')
 	g.writeln('typedef void* (*__v_thread_start_fn)(void*);')
@@ -24272,14 +24293,27 @@ fn (g &FlatGen) is_builtin_autostr_addr_state(name string) bool {
 
 fn (mut g FlatGen) emit_tinyc_windows_thread_local_slot(cname string, ct string, dims string) {
 	g.writeln('#if defined(__TINYC__) && defined(_WIN32)')
+	// TinyCC's bundled import library does not expose the Fls* symbols. Resolve
+	// them at runtime so Windows can still release each slot at thread exit.
+	g.writeln('typedef DWORD (WINAPI *${cname}_fls_alloc_fn)(void (WINAPI *)(void*));')
+	g.writeln('typedef void* (WINAPI *${cname}_fls_get_fn)(DWORD);')
+	g.writeln('typedef BOOL (WINAPI *${cname}_fls_set_fn)(DWORD, void*);')
 	g.writeln('static DWORD ${cname}_key = 0xFFFFFFFF;')
+	g.writeln('static ${cname}_fls_get_fn ${cname}_fls_get;')
+	g.writeln('static ${cname}_fls_set_fn ${cname}_fls_set;')
 	g.writeln('static void WINAPI ${cname}_slot_free(void* p) { free(p); }')
 	g.writeln('static void ${cname}_key_init(void) __attribute__((constructor));')
-	g.writeln('static void ${cname}_key_init(void) { ${cname}_key = FlsAlloc(${cname}_slot_free); }')
+	g.writeln('static void ${cname}_key_init(void) {')
+	g.writeln('\tvoid* kernel32 = GetModuleHandleA("kernel32.dll");')
+	g.writeln('\t${cname}_fls_alloc_fn fls_alloc = (${cname}_fls_alloc_fn)GetProcAddress(kernel32, "FlsAlloc");')
+	g.writeln('\t${cname}_fls_get = (${cname}_fls_get_fn)GetProcAddress(kernel32, "FlsGetValue");')
+	g.writeln('\t${cname}_fls_set = (${cname}_fls_set_fn)GetProcAddress(kernel32, "FlsSetValue");')
+	g.writeln('\t${cname}_key = fls_alloc && ${cname}_fls_get && ${cname}_fls_set ? fls_alloc(${cname}_slot_free) : TlsAlloc();')
+	g.writeln('}')
 	if dims.len > 0 {
-		g.writeln('static ${ct} (*${cname}_slot(void))${dims} { void* p = FlsGetValue(${cname}_key); if (!p) { p = calloc(1, sizeof(*${cname}_slot())); FlsSetValue(${cname}_key, p); } return p; }')
+		g.writeln('static ${ct} (*${cname}_slot(void))${dims} { void* p = ${cname}_fls_get ? ${cname}_fls_get(${cname}_key) : TlsGetValue(${cname}_key); if (!p) { p = calloc(1, sizeof(*${cname}_slot())); if (${cname}_fls_set) ${cname}_fls_set(${cname}_key, p); else TlsSetValue(${cname}_key, p); } return p; }')
 	} else {
-		g.writeln('static ${ct}* ${cname}_slot(void) { void* p = FlsGetValue(${cname}_key); if (!p) { p = calloc(1, sizeof(${ct})); FlsSetValue(${cname}_key, p); } return (${ct}*)p; }')
+		g.writeln('static ${ct}* ${cname}_slot(void) { void* p = ${cname}_fls_get ? ${cname}_fls_get(${cname}_key) : TlsGetValue(${cname}_key); if (!p) { p = calloc(1, sizeof(${ct})); if (${cname}_fls_set) ${cname}_fls_set(${cname}_key, p); else TlsSetValue(${cname}_key, p); } return (${ct}*)p; }')
 	}
 	g.writeln('#define ${cname} (*${cname}_slot())')
 	g.writeln('#elif defined(__TINYC__)')
