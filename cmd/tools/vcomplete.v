@@ -73,7 +73,7 @@ SUBCMD:
   zsh       : [QUERY]       - returns ZSH  compatible completion code with completions computed from QUERY
   powershell: [QUERY]       - returns PowerShell compatible completion code with completions computed from QUERY"
 
-// Snooped from cmd/v/v.v, vlib/v/pref/pref.c.v
+// Snooped from cmd/v/v.v and vlib/v/pref/default.v.
 const auto_complete_commands = [
 	// simple_cmd
 	'ast',
@@ -87,16 +87,19 @@ const auto_complete_commands = [
 	'build-vbinaries',
 	'bump',
 	'check-md',
+	'clean',
 	'complete',
 	'compress',
 	'cover',
 	'create',
 	'doctor',
 	'download',
+	'env',
 	'fmt',
 	'gret',
 	'git-fmt-hook',
 	'ls',
+	'pbgen',
 	'quest',
 	'retry',
 	'reduce',
@@ -113,6 +116,7 @@ const auto_complete_commands = [
 	'test-parser',
 	'test-self',
 	'test',
+	'tool',
 	'tracev',
 	'up',
 	'watch',
@@ -133,6 +137,7 @@ const auto_complete_commands = [
 	'list',
 	'remove',
 	'unlink',
+	'why',
 	'vlib-docs',
 	'get',
 	'version',
@@ -140,6 +145,7 @@ const auto_complete_commands = [
 	'build',
 	'build-module',
 	'missdoc',
+	'mod',
 ]
 // Entries in the flag arrays below should be entered as is:
 // * Short flags, e.g.: "-v", should be entered: '-v'
@@ -155,6 +161,7 @@ const auto_complete_flags = [
 	'-show-asserts',
 	'-check-syntax',
 	'-check',
+	'-json-errors',
 	'-?',
 	'-h',
 	'-help',
@@ -194,7 +201,6 @@ const auto_complete_flags = [
 	'-trace-calls',
 	'-trace-fns',
 	'-manualfree',
-	'-skip-unused',
 	'-no-skip-unused',
 	'-compress',
 	'-freestanding',
@@ -517,10 +523,12 @@ fn auto_complete(args []string) {
 			mut files := []string{}
 			list := auto_complete_request(sub_args[1..])
 			for entry in list {
-				match true {
-					os.is_dir(entry) { dirs << entry }
-					os.is_file(entry) { files << entry }
-					else { lines << entry }
+				if os.is_dir(entry) {
+					dirs << entry
+				} else if os.is_file(entry) {
+					files << entry
+				} else {
+					lines << entry
 				}
 			}
 			println('compadd -q -- ${lines.join(' ')}')

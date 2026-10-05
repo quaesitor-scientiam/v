@@ -8,12 +8,12 @@ import net.conv
 // ---- ORM on Conn (single pinned connection) ----
 
 // select is used internally by V's ORM for processing `SELECT ` queries.
-pub fn (c &Conn) select(config orm.SelectConfig, data orm.QueryData, where orm.QueryData) ![][]orm.Primitive {
+pub fn (mut c Conn) select(config orm.SelectConfig, data orm.QueryData, where orm.QueryData) ![][]orm.Primitive {
 	c.ensure_active()!
 	where_with_tenant := orm.apply_tenant_filter(config.table, where)
 	query := orm.orm_select_gen(config, '"', true, '$', 1, where_with_tenant)
 
-	rows := pg_stmt_worker(c, query, where_with_tenant, data)!
+	rows := pg_stmt_worker(mut c, query, where_with_tenant, data)!
 
 	mut ret := [][]orm.Primitive{}
 
@@ -29,40 +29,40 @@ pub fn (c &Conn) select(config orm.SelectConfig, data orm.QueryData, where orm.Q
 }
 
 // insert is used internally by V's ORM for processing `INSERT ` queries.
-pub fn (c &Conn) insert(table orm.Table, data orm.QueryData) ! {
+pub fn (mut c Conn) insert(table orm.Table, data orm.QueryData) ! {
 	c.ensure_active()!
 	query, converted_data :=
 		orm.orm_stmt_gen(.pg, table, '"', .insert, true, '$', 1, data, orm.QueryData{})
-	pg_stmt_worker(c, query, converted_data, orm.QueryData{})!
+	pg_stmt_worker(mut c, query, converted_data, orm.QueryData{})!
 }
 
 // update is used internally by V's ORM for processing `UPDATE ` queries.
-pub fn (c &Conn) update(table orm.Table, data orm.QueryData, where orm.QueryData) ! {
+pub fn (mut c Conn) update(table orm.Table, data orm.QueryData, where orm.QueryData) ! {
 	c.ensure_active()!
 	where_with_tenant := orm.apply_tenant_filter(table, where)
 	query, _ := orm.orm_stmt_gen(.default, table, '"', .update, true, '$', 1, data,
 		where_with_tenant)
-	pg_stmt_worker(c, query, data, where_with_tenant)!
+	pg_stmt_worker(mut c, query, data, where_with_tenant)!
 }
 
 // delete is used internally by V's ORM for processing `DELETE ` queries.
-pub fn (c &Conn) delete(table orm.Table, where orm.QueryData) ! {
+pub fn (mut c Conn) delete(table orm.Table, where orm.QueryData) ! {
 	c.ensure_active()!
 	where_with_tenant := orm.apply_tenant_filter(table, where)
 	query, _ := orm.orm_stmt_gen(.default, table, '"', .delete, true, '$', 1, orm.QueryData{},
 		where_with_tenant)
-	pg_stmt_worker(c, query, orm.QueryData{}, where_with_tenant)!
+	pg_stmt_worker(mut c, query, orm.QueryData{}, where_with_tenant)!
 }
 
 // last_id is used internally by V's ORM for post-processing `INSERT ` queries.
-pub fn (c &Conn) last_id() int {
+pub fn (mut c Conn) last_id() int {
 	query := 'SELECT LASTVAL();'
 
 	return c.q_int(query) or { 0 }
 }
 
 // create is used internally by V's ORM for processing table creation queries (DDL).
-pub fn (c &Conn) create(table orm.Table, fields []orm.TableField) ! {
+pub fn (mut c Conn) create(table orm.Table, fields []orm.TableField) ! {
 	query := orm.orm_table_gen(.pg, table, '"', true, 0, fields, pg_type_from_v, false) or {
 		return err
 	}
@@ -75,14 +75,14 @@ pub fn (c &Conn) create(table orm.Table, fields []orm.TableField) ! {
 }
 
 // drop is used internally by V's ORM for processing table destroying queries (DDL).
-pub fn (c &Conn) drop(table orm.Table) ! {
+pub fn (mut c Conn) drop(table orm.Table) ! {
 	query := 'DROP TABLE "${table.name}";'
 	c.exec(query)!
 }
 
 // execute runs a raw SQL query and returns result rows as driver-agnostic orm.Row values,
 // with column names populated from the result metadata.
-pub fn (c &Conn) execute(query string) ![]orm.Row {
+pub fn (mut c Conn) execute(query string) ![]orm.Row {
 	res := c.exec_result(query)!
 
 	mut orm_rows := []orm.Row{}
@@ -100,32 +100,32 @@ pub fn (c &Conn) execute(query string) ![]orm.Row {
 }
 
 // orm_begin starts a transaction on this conn.
-pub fn (c &Conn) orm_begin() ! {
+pub fn (mut c Conn) orm_begin() ! {
 	c.begin_on_conn()!
 }
 
 // orm_commit commits the transaction on this conn.
-pub fn (c &Conn) orm_commit() ! {
+pub fn (mut c Conn) orm_commit() ! {
 	c.commit()!
 }
 
 // orm_rollback rolls back the transaction on this conn.
-pub fn (c &Conn) orm_rollback() ! {
+pub fn (mut c Conn) orm_rollback() ! {
 	c.rollback()!
 }
 
 // orm_savepoint creates a savepoint on this conn.
-pub fn (c &Conn) orm_savepoint(name string) ! {
+pub fn (mut c Conn) orm_savepoint(name string) ! {
 	c.savepoint(name)!
 }
 
 // orm_rollback_to rolls back to a savepoint on this conn.
-pub fn (c &Conn) orm_rollback_to(name string) ! {
+pub fn (mut c Conn) orm_rollback_to(name string) ! {
 	c.rollback_to(name)!
 }
 
 // orm_release_savepoint releases a savepoint on this conn.
-pub fn (c &Conn) orm_release_savepoint(name string) ! {
+pub fn (mut c Conn) orm_release_savepoint(name string) ! {
 	c.release_savepoint(name)!
 }
 
@@ -311,9 +311,14 @@ fn pg_stmt_match(mut types []u32, mut vals []&char, mut lens []i32, mut formats 
 			formats << 1
 		}
 		u8 {
-			types << u32(Oid.t_char)
-			vals << &char(&data)
-			lens << i32(sizeof(u8))
+			// `u8` columns are declared as SMALLINT (int2) by pg_type_from_v(), so
+			// they have to be bound as int2 too. Binding them as the internal
+			// `"char"` type (Oid.t_char) makes PostgreSQL reject the statement with
+			// `column ... is of type smallint but expression is of type "char"`.
+			types << u32(Oid.t_int2)
+			num := conv.hton16(u16(data))
+			vals << &char(&num)
+			lens << i32(sizeof(u16))
 			formats << 1
 		}
 		u16 {
@@ -338,9 +343,11 @@ fn pg_stmt_match(mut types []u32, mut vals []&char, mut lens []i32, mut formats 
 			formats << 1
 		}
 		i8 {
-			types << u32(Oid.t_char)
-			vals << &char(&data)
-			lens << i32(sizeof(i8))
+			// See the `u8` branch above: `i8` columns are SMALLINT (int2) as well.
+			types << u32(Oid.t_int2)
+			num := conv.hton16(u16(i16(data)))
+			vals << &char(&num)
+			lens << i32(sizeof(i16))
 			formats << 1
 		}
 		i16 {
@@ -351,7 +358,7 @@ fn pg_stmt_match(mut types []u32, mut vals []&char, mut lens []i32, mut formats 
 			formats << 1
 		}
 		int {
-			$if new_int ? && x64 {
+			$if new_int ?&& x64 {
 				types << u32(Oid.t_int8)
 				num := conv.hton64(u64(data))
 				vals << &char(&num)
@@ -469,7 +476,7 @@ fn pg_type_from_v(typ int) !string {
 			'BOOLEAN'
 		}
 		orm.type_idx['int'] {
-			$if new_int ? && x64 {
+			$if new_int ?&& x64 {
 				'BIGINT'
 			} $else {
 				'INT'
@@ -687,8 +694,10 @@ fn val_to_primitive(val ?string, typ int) !orm.Primitive {
 			}
 			// u8
 			orm.type_idx['u8'] {
-				data := str.i8()
-				return orm.Primitive(*unsafe { &u8(&data) })
+				// `u8` columns are SMALLINT, and are bound as a non negative int2,
+				// so the text PostgreSQL returns spans the full 0..255 range;
+				// parsing it as an i8 would saturate everything above 127.
+				return orm.Primitive(str.u8())
 			}
 			// u16
 			orm.type_idx['u16'] {
@@ -727,7 +736,14 @@ fn val_to_primitive(val ?string, typ int) !orm.Primitive {
 				return orm.Primitive(pg_parse_timestamp(str)!)
 			}
 			orm.enum_ {
-				return orm.Primitive(str.i64())
+				// V's ORM stores enums in a `BIGINT` column, but a native PostgreSQL
+				// enum type (`CREATE TYPE ... AS ENUM`) returns the label of the value
+				// instead. Pass such a label on unchanged, so that the ORM can match it
+				// against the names of the enum values.
+				if number := strconv.atoi64(str.trim_space()) {
+					return orm.Primitive(number)
+				}
+				return orm.Primitive(str)
 			}
 			else {}
 		}

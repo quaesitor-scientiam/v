@@ -804,7 +804,11 @@ fn (mut app App) dot_cmd(cmd string) {
 				return
 			}
 			shell_cmd := parts[1..].join(' ')
-			result := os.execute(shell_cmd)
+			result := os.exec(if os.user_os() == 'windows' {
+				['cmd.exe', '/d', '/s', '/c', shell_cmd]
+			} else {
+				['sh', '-c', shell_cmd]
+			})
 			if result.output.len > 0 {
 				print(result.output)
 				if !result.output.ends_with('\n') {
@@ -1020,10 +1024,10 @@ fn (mut app App) refresh_completions() {
 		'.system', '.backup', '.fullschema', '.dbinfo', '.stats', '.lint', '.cd']
 	kws := ['SELECT', 'FROM', 'WHERE', 'INSERT', 'INTO', 'UPDATE', 'SET', 'DELETE', 'CREATE', 'TABLE',
 		'DROP', 'ALTER', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'ON', 'ORDER', 'BY', 'GROUP',
-		'HAVING', 'LIMIT', 'OFFSET', 'AND', 'OR', 'NOT', 'NULL', 'VALUES', 'PRIMARY', 'KEY',
-		'INTEGER', 'TEXT', 'REAL', 'BLOB', 'UNIQUE', 'DEFAULT', 'AUTOINCREMENT', 'PRAGMA', 'INDEX',
-		'DISTINCT', 'COUNT', 'SUM', 'MIN', 'MAX', 'AVG', 'AS', 'LIKE', 'IN', 'IS', 'BETWEEN', 'CASE',
-		'WHEN', 'THEN', 'ELSE', 'END', 'BEGIN', 'TRANSACTION', 'COMMIT', 'ROLLBACK']
+		'HAVING', 'LIMIT', 'OFFSET', 'AND', 'OR', 'NOT', 'NULL', 'VALUES', 'PRIMARY', 'KEY', 'INTEGER',
+		'TEXT', 'REAL', 'BLOB', 'UNIQUE', 'DEFAULT', 'AUTOINCREMENT', 'PRAGMA', 'INDEX', 'DISTINCT',
+		'COUNT', 'SUM', 'MIN', 'MAX', 'AVG', 'AS', 'LIKE', 'IN', 'IS', 'BETWEEN', 'CASE', 'WHEN',
+		'THEN', 'ELSE', 'END', 'BEGIN', 'TRANSACTION', 'COMMIT', 'ROLLBACK']
 	mut words := []string{}
 	words << dot_cmds
 	words << kws

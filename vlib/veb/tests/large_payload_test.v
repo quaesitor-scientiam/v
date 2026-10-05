@@ -45,10 +45,10 @@ fn testsuite_begin() {
 		assert true == false, 'timeout reached!'
 		exit(1)
 	}()
-
 	mut app := &App{}
-	spawn veb.run_at[App, Context](mut app, port: port, timeout_in_seconds: 2, family: .ip)
+
 	// app startup time
+	spawn veb.run_at[App, Context](mut app, port: port, timeout_in_seconds: 2, family: .ip)
 	_ := <-app.started
 }
 
@@ -79,7 +79,7 @@ fn test_large_request_header() {
 		})!
 	})!
 
-	assert x.status() == .request_entity_too_large
+	assert x.status() == .request_header_fields_too_large
 }
 
 fn test_bigger_content_length() {

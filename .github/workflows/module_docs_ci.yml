@@ -5,7 +5,6 @@ on:
     paths:
       - 'vlib/**.v'
       - 'vlib/**.md'
-      - '!vlib/v3/**'
       - 'cmd/tools/vdoc/**.v'
       - 'cmd/tools/vdoc/theme/**.js'
       - 'cmd/tools/vdoc/theme/**.css'
@@ -18,7 +17,6 @@ on:
     paths:
       - 'vlib/**.v'
       - 'vlib/**.md'
-      - '!vlib/v3/**'
       - 'cmd/tools/vdoc/**.v'
       - 'cmd/tools/vdoc/theme/**.js'
       - 'cmd/tools/vdoc/theme/**.css'
@@ -32,23 +30,29 @@ concurrency:
   group: module_docs-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
+permissions:
+  contents: read
+
 jobs:
   build-module-docs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/cache-apt-packages-action
       - name: Build V
         run: make -j4 && ./v symlink
       - name: Update packages, before running apt install
         run: .github/workflows/disable_azure_mirror.sh && v retry -- sudo apt update -y -qq
       - name: Install dependencies (some modules wrap C libs)
-        run: v retry -- sudo apt install --quiet -y libpq-dev
-          libsodium-dev libasound2-dev libssl-dev \
-          sqlite3 libsqlite3-dev libfreetype6-dev \
-          libx11-dev libxi-dev freeglut3-dev \
-          libgl1-mesa-dri libxcursor-dev libgl-dev libxrandr-dev libegl-dev
+        run: |
+          v retry -- sudo apt install --quiet -y libpq-dev \
+            libsodium-dev libasound2-dev libssl-dev \
+            sqlite3 libsqlite3-dev libfreetype6-dev \
+            libx11-dev libxi-dev freeglut3-dev \
+            libgl1-mesa-dri libxcursor-dev libgl-dev libxrandr-dev libegl-dev
       - name: Install markdown from vpm
         run: v retry -- v install markdown
       - name: Test v doc
@@ -57,4 +61,4 @@ jobs:
         run: VJOBS=1 ./v doc -m -f html -unsafe-run-examples -time vlib/
       - name: Deploy docs to vercel
         if: github.event_name == 'push' && github.repository == 'vlang/v' && github.ref == 'refs/heads/master'
-        run: npx vercel --confirm --prod --name vmodules --token ${{ secrets.VERCEL_TOKEN }} vlib/_docs/ || true
+        run: npx vercel --confirm --prod --name vmodules --token ${{ secrets.VERCEL_TOKEN }} vlib/_docs/

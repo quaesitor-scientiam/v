@@ -125,6 +125,85 @@ pub fn norm_path(path string) string {
 	return res
 }
 
+// path_rel returns a path which, resolved against basepath, reaches targpath.
+// It follows Go's path/filepath.Rel, except that the result is always
+// normalized: both paths are normalized first, `.` is returned when they name
+// the same path, and an error is returned when targpath cannot be expressed
+// relative to basepath. That happens when one path is absolute and the other is
+// not, when the two paths are on different Windows volumes, or when, after the
+// leading components it shares with targpath, basepath still contains `..`.
+// path_rel is purely lexical: it does not access the filesystem, resolve
+// symlinks or use the working directory. Pass the paths through `os.real_path`
+// or `os.abs_path` first if that matters.
+//
+// Example:
+// ```v
+// assert os.path_rel('/a/b', '/a/b/c')! == 'c'
+// assert os.path_rel('/a/b', '/a/c')! == os.join_path('..', 'c')
+// ```
+pub fn path_rel(basepath string, targpath string) !string {
+	nbase := norm_path(basepath)
+	ntarg := norm_path(targpath)
+	if path_rel_same_word(nbase, ntarg) {
+		return dot_str
+	}
+	if is_abs_path(nbase) != is_abs_path(ntarg) {
+		return error('path_rel: cannot make "${targpath}" relative to "${basepath}"')
+	}
+	// The root (a Windows volume, plus the server and share of a `\\?\UNC\`
+	// path) must match, and is left out of the components compared below.
+	base_root_len := win_root_len(nbase)
+	targ_root_len := win_root_len(ntarg)
+	$if windows {
+		if !path_rel_same_word(nbase[..base_root_len], ntarg[..targ_root_len]) {
+			return error('path_rel: cannot make "${targpath}" relative to "${basepath}"')
+		}
+	}
+	sep := path_separator
+	base_elems := path_rel_components(nbase[base_root_len..], sep)
+	targ_elems := path_rel_components(ntarg[targ_root_len..], sep)
+	// The number of leading components the two paths share.
+	mut common := 0
+	for common < base_elems.len && common < targ_elems.len
+		&& path_rel_same_word(base_elems[common], targ_elems[common]) {
+		common++
+	}
+	// Going up from a base which is itself below the working directory would
+	// need more `..` than the path has levels, so it cannot be expressed.
+	if common < base_elems.len && base_elems[common] == dot_dot {
+		return error('path_rel: cannot make "${targpath}" relative to "${basepath}"')
+	}
+	mut ret := []string{cap: base_elems.len - common + targ_elems.len - common}
+	for _ in common .. base_elems.len {
+		ret << dot_dot
+	}
+	ret << targ_elems[common..]
+	if ret.len == 0 {
+		return dot_str
+	}
+	return ret.join(sep)
+}
+
+// path_rel_components splits an already normalized path, whose Windows root
+// has been cut off, into its components. The separator left at the front of a
+// rooted path does not make a component, and a path naming only the current
+// directory has no components at all.
+fn path_rel_components(norm string, sep string) []string {
+	if norm == dot_str || norm == empty_str {
+		return []string{}
+	}
+	return norm.split(sep).filter(it != empty_str)
+}
+
+// path_rel_same_word compares two path components the way the host filesystem
+// would, which is case-insensitively on Windows and exactly elsewhere (like Go).
+fn path_rel_same_word(a string, b string) bool {
+	$if windows {
+		return a.to_lower_ascii() == b.to_lower_ascii()
+	}
+	return a == b
+}
+
 // existing_path returns the existing part of the given `path`.
 // An error is returned if there is no existing part of the given `path`.
 pub fn existing_path(path string) !string {
@@ -225,6 +304,72 @@ pub fn to_slash(path string) string {
 	}
 }
 
+// parent_dir returns the parent directory of the given `path`, or an empty
+// string when `path` has no parent. A path has no parent when it is a
+// filesystem root (`/`, `C:\`, `\\server\share`, `\\?\UNC\server\share`), the
+// current directory reference `.`, a single element with no directory in it
+// (`file.v`), or a Windows drive relative path (`C:`, `C:file.v`,
+// `C:dir\file.v`), which resolves against the current directory *of that
+// drive* - state the caller cannot see, and which every one of its ancestors
+// shares, so none of them is safe to hand back.
+// A separator is any byte the platform accepts as one, so a Windows path may
+// mix `/` and `\` freely, and trailing separators are ignored: they name the
+// same directory, so `parent_dir('/a/b/')` is `/a`, exactly like `/a/b`.
+//
+// Every value parent_dir returns is safe to probe directly, and that is what
+// separates it from `dir`, which has two Windows answers that resolve against
+// a current directory rather than against the path they came from:
+// `dir('C:')` is the relative `.`, and `dir(r'C:\outside')` is the bare volume
+// `C:`, which names the current directory *on drive C*, not its root.
+// parent_dir reports "no parent" for the first and the absolute root `C:\` for
+// the second, so a parent directory walk can neither escape the drive nor
+// probe a drive relative path on the way up.
+pub fn parent_dir(path string) string {
+	if path == '' {
+		return empty_str
+	}
+	if is_drive_relative_path(path) {
+		// `C:`, `C:file.v` and `C:dir\file.v` all resolve against the current
+		// directory of drive C, and so does every ancestor of them, `C:dir`
+		// included. There is no parent here that a caller could safely probe.
+		return empty_str
+	}
+	root_len := win_root_len(path)
+	// Trailing separators name the same directory, so they cannot select the
+	// parent: without this, `/a/b/` would answer `/a/b` and a walk would probe
+	// that directory twice, losing one ancestor to its iteration bound. Never
+	// trim into a root though, which is nothing but a volume and a separator.
+	mut end := path.len
+	for end > root_len + 1 && is_slash(path[end - 1]) {
+		end--
+	}
+	// Scan for the last separator instead of delegating to `dir`, which commits
+	// to one separator kind for the whole path (`/` whenever the path holds any)
+	// and so answers `C:` for the mixed `C:/one\two` that Windows accepts,
+	// skipping the real parent `C:/one`.
+	mut pos := -1
+	for i := end - 1; i >= root_len; i-- {
+		if is_slash(path[i]) {
+			pos = i
+			break
+		}
+	}
+	if pos < 0 {
+		// A single element with no directory in it, such as `file.v`.
+		return empty_str
+	}
+	if pos == end - 1 {
+		// Nothing but separators after the root: `path` is a root itself.
+		return empty_str
+	}
+	if pos == root_len {
+		// The parent is the root. Keep its separator, so the result is the
+		// absolute `/` or `C:\`, never the drive relative `C:`.
+		return path[..pos + 1]
+	}
+	return path[..pos]
+}
+
 // from_slash returns the result of replacing each slash (`/`) character is path with a separator character.
 pub fn from_slash(path string) string {
 	return $if windows {
@@ -265,6 +410,51 @@ fn win_volume_len(path string) int {
 		}
 	}
 	return 0
+}
+
+// win_root_len returns the length of the leading part of `path` that has no
+// parent directory. That is the Windows volume, except for an extended length
+// UNC path (`\\?\UNC\server\share`): `win_volume_len` stops at the `\\?\UNC`
+// tag, which does not name a location, so the server and the share belong to
+// the root as well. Like `win_volume_len`, it is 0 outside Windows.
+fn win_root_len(path string) int {
+	volume_len := win_volume_len(path)
+	if volume_len == 0 || !is_extended_unc_tag(path, volume_len) {
+		return volume_len
+	}
+	// Consume `\server` and then `\share`. A path that ends before both are
+	// present does not name a location either, so all of it is the root.
+	mut i := volume_len
+	for _ in 0 .. 2 {
+		if i >= path.len || !is_slash(path[i]) {
+			return path.len
+		}
+		i++
+		for i < path.len && !is_slash(path[i]) {
+			i++
+		}
+	}
+	return i
+}
+
+// is_drive_relative_path reports whether `path` names a location relative to
+// the current directory of a Windows drive: `C:`, `C:file.v`, `C:dir\file.v`.
+// Windows keeps one current directory per drive, so such a path resolves
+// against state a caller cannot see. Elsewhere `C:dir` is an ordinary file
+// name, so this is Windows only.
+fn is_drive_relative_path(path string) bool {
+	$if !windows {
+		return false
+	}
+	return has_drive_letter(path) && (path.len == 2 || !is_slash(path[2]))
+}
+
+// is_extended_unc_tag reports whether `win_volume_len` stopped at the `\\?\UNC`
+// tag that introduces the server and share of an extended length UNC path.
+fn is_extended_unc_tag(path string, volume_len int) bool {
+	return volume_len == 7 && starts_w_slash_slash(path) && path[2] == qmark
+		&& is_slash(path[3]) && (path[4] == `U` || path[4] == `u`)
+		&& (path[5] == `N` || path[5] == `n`) && (path[6] == `C` || path[6] == `c`)
 }
 
 fn is_slash(b u8) bool {

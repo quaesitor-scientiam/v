@@ -5,7 +5,7 @@ module main
 
 import gg
 import os
-import v3.profiler
+import v.profiler
 
 // handle_event processes user input events
 pub fn handle_event(e &gg.Event, mut app App) {
@@ -229,5 +229,5 @@ fn open_in_editor(app &App) {
 
 	// Try to open in VS Code with line number
 	cmd := 'code -g "${alloc.file}:${alloc.line}"'
-	os.execute(cmd)
+	os.exec(['code', '-g', '${alloc.file}' + ':' + '${alloc.line}'])
 }

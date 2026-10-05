@@ -10,6 +10,8 @@ import os
 
 fn C.socketpair(domain i32, typ i32, protocol i32, sockets &i32) i32
 
+fn C.shutdown(fd i32, how i32) i32
+
 fn regression_handler(_ HttpRequest) !HttpResponse {
 	return HttpResponse{
 		content: 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok'.bytes()
@@ -54,7 +56,7 @@ fn test_pipelined_requests_answered_in_one_batch() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -90,7 +92,7 @@ fn test_fragmented_request_is_reassembled() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -121,6 +123,38 @@ fn test_fragmented_request_is_reassembled() ! {
 	C.close(client_fd)
 }
 
+fn test_half_closed_client_still_receives_buffered_response() ! {
+	server := new_server(ServerConfig{
+		family:  .ip
+		port:    0
+		handler: regression_handler
+	})!
+	epoll_fd := C.epoll_create1(0)
+	assert epoll_fd >= 0
+	defer { C.close(epoll_fd) }
+	mut sockets := [2]i32{}
+	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
+	server_fd := sockets[0]
+	client_fd := sockets[1]
+	set_blocking(server_fd, false)
+	set_blocking(client_fd, false)
+
+	mut w := new_regression_worker(server, epoll_fd)
+	assert add_fd_to_epoll(epoll_fd, server_fd, u32(C.EPOLLIN | C.EPOLLET)) == 0
+	mut cs := state_for(mut w, server_fd)
+	req := 'GET /half-close HTTP/1.1\r\nHost: x\r\n\r\n'
+	assert C.send(client_fd, req.str, req.len, C.MSG_NOSIGNAL) == req.len
+	assert C.shutdown(client_fd, C.SHUT_WR) == 0
+
+	serve_conn(mut w, server_fd, mut cs)
+	response := recv_available(client_fd)
+	assert response.contains('HTTP/1.1 200 OK'), response
+	assert response.ends_with('ok'), response
+	assert unsafe { w.conns[server_fd] == nil }
+
+	C.close(client_fd)
+}
+
 fn test_keep_alive_rearms_after_consumed_edge() ! {
 	server := new_server(ServerConfig{
 		family:  .ip
@@ -130,7 +164,7 @@ fn test_keep_alive_rearms_after_consumed_edge() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -189,7 +223,7 @@ fn test_append_handler_pipelining_zero_copy() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -221,7 +255,7 @@ fn test_append_handler_should_close() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -252,8 +286,7 @@ fn test_new_server_requires_exactly_one_handler() {
 		port:           0
 		handler:        regression_handler
 		append_handler: append_ok_handler
-	})
-	{
+	}) {
 		assert false, 'expected an error when both handlers are set'
 	}
 }
@@ -279,7 +312,7 @@ fn test_worker_state_reaches_handler() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -331,7 +364,7 @@ fn test_pipelined_request_behind_file_response_is_served() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -350,6 +383,77 @@ fn test_pipelined_request_behind_file_response_is_served() ! {
 	// The file body was streamed AND the request pipelined behind it was served.
 	assert resp.contains('FILEBODY'), resp
 	assert resp.contains('after'), resp
+
+	C.close(server_fd)
+	C.close(client_fd)
+}
+
+fn test_blocked_file_response_stays_a_pipeline_boundary() ! {
+	file_size := 2 * 1024 * 1024
+	tmp := os.join_path(os.vtmp_dir(), 'fasthttp_blocked_pipe_file_test.txt')
+	os.write_file(tmp, 'x'.repeat(file_size))!
+	defer {
+		os.rm(tmp) or {}
+	}
+	mut handled := &WorkerCounter{}
+	file_handler := fn [tmp, file_size, mut handled] (req HttpRequest) !HttpResponse {
+		handled.n++
+		path := req.buffer[req.path.start..req.path.start + req.path.len].bytestr()
+		if path == '/file' {
+			return HttpResponse{
+				content:   'HTTP/1.1 200 OK\r\nContent-Length: ${file_size}\r\nConnection: keep-alive\r\n\r\n'.bytes()
+				file_path: tmp
+			}
+		}
+		return HttpResponse{
+			content: 'HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nafter'.bytes()
+		}
+	}
+	server := new_server(ServerConfig{
+		family:  .ip
+		port:    0
+		handler: file_handler
+	})!
+	epoll_fd := C.epoll_create1(0)
+	assert epoll_fd >= 0
+	defer { C.close(epoll_fd) }
+	mut sockets := [2]i32{}
+	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
+	server_fd := sockets[0]
+	client_fd := sockets[1]
+	send_buffer_size := 4096
+	assert C.setsockopt(server_fd, C.SOL_SOCKET, C.SO_SNDBUF, &send_buffer_size, sizeof(send_buffer_size)) == 0
+	set_blocking(server_fd, false)
+	set_blocking(client_fd, false)
+
+	mut w := new_regression_worker(server, epoll_fd)
+	assert add_fd_to_epoll(epoll_fd, server_fd, u32(C.EPOLLIN | C.EPOLLET)) == 0
+	mut cs := state_for(mut w, server_fd)
+	req := 'GET /file HTTP/1.1\r\nHost: x\r\n\r\nGET /next HTTP/1.1\r\nHost: x\r\n\r\n'
+	assert C.send(client_fd, req.str, req.len, C.MSG_NOSIGNAL) == req.len
+	serve_conn(mut w, server_fd, mut cs)
+	assert handled.n == 1
+	assert cs.file_fd != -1
+	assert cs.read_buf.len > 0
+
+	mut response := ''
+	for _ in 0 .. 64 {
+		response += recv_available(client_fd)
+		if handled.n == 2 && !has_pending_response(cs) {
+			break
+		}
+		handle_writable(mut w, server_fd)
+	}
+	response += recv_available(client_fd)
+	assert handled.n == 2
+	assert response.count('HTTP/1.1 200 OK') == 2, response[..if response.len < 512 {
+		response.len
+	} else {
+		512
+	}]
+	assert response.ends_with('after')
+	assert cs.file_fd == -1
+	assert cs.read_buf.len == 0
 
 	C.close(server_fd)
 	C.close(client_fd)
@@ -381,7 +485,7 @@ fn test_zero_length_file_response_does_not_leak_fd() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -419,7 +523,7 @@ fn record_sigpipe_handler(_ os.Signal) {
 
 fn current_thread_blocks_sigpipe() bool {
 	mut current_mask := C.sigset_t{}
-	if C.pthread_sigmask(C.SIG_SETMASK, C.NULL, &current_mask) != 0 {
+	if C.pthread_sigmask(C.SIG_SETMASK, unsafe { nil }, &current_mask) != 0 {
 		return true
 	}
 	return C.sigismember(&current_mask, C.SIGPIPE) == 1
@@ -452,7 +556,7 @@ fn test_sendfile_to_disconnected_client_preserves_sigpipe_handler() ! {
 	defer {
 		file.close()
 	}
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -506,7 +610,7 @@ fn test_reusable_takeover_behind_buffered_response_closes() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]
@@ -537,7 +641,7 @@ fn test_conn_state_is_pooled_with_buffers_retained() ! {
 	epoll_fd := C.epoll_create1(0)
 	assert epoll_fd >= 0
 	defer { C.close(epoll_fd) }
-	mut sockets := [2]int{}
+	mut sockets := [2]i32{}
 	assert C.socketpair(C.AF_UNIX, C.SOCK_STREAM, 0, &sockets[0]) == 0
 	server_fd := sockets[0]
 	client_fd := sockets[1]

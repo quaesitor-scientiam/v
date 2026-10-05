@@ -6,7 +6,7 @@ on:
     branches:
       - master
     paths-ignore:
-      # vlib/v3/** is intentionally NOT ignored: V3 is the default compiler on
+      # vlib/v/** is intentionally NOT ignored: V3 is the default compiler on
       # Linux, including this s390x runner.
       - '**.md'
       - '**.yml'
@@ -32,7 +32,6 @@ on:
       - 'vlib/strings/**'
       - 'vlib/sync/**'
       - 'vlib/v/**'
-      - 'vlib/v3/**'
       - 'thirdparty/**'
       - 'vc/**'
       - 'v.mod'
@@ -47,6 +46,10 @@ concurrency:
   group: s390x-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   s390x_linux:
     # The host should always be Linux
@@ -56,7 +59,9 @@ jobs:
     name: Build on ubuntu-22.04 s390x
     steps:
       - uses: actions/checkout@v7
-      - uses: uraimo/run-on-arch-action@v3
+        with:
+          persist-credentials: false
+      - uses: uraimo/run-on-arch-action@1e2c619f81e6d8609845ea1d2f443a778df1ac68 # v3
         name: Run commands
         id: runcmd
         with:

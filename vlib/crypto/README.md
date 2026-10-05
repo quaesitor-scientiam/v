@@ -20,6 +20,54 @@ system's cryptographically secure random source and can return an error. The sep
 
 ## Examples
 
+### Streamed SHA checksums
+
+SHA-1 and SHA-2 digests accept a stream through repeated `write()` calls. The total stream
+can exceed 2 GiB on 32-bit targets; each individual input buffer must fit in an array.
+Call `sum([])` to obtain the current checksum while preserving the digest for further writes.
+
+### HMAC for many messages with one key
+
+`hmac.new` is a one-shot HMAC that accepts any hash function. To authenticate many messages
+with the same key, use `hmac.new_hmac`: it processes the key once, and after that `write()`
+and `sum_into()` do not allocate. Each `sum_into()` completes one message, and the next
+`write()` starts a new one. It supports `crypto.sha1`, `crypto.sha256` and `crypto.sha512`
+digests.
+
+```v
+import crypto.hmac
+import crypto.sha256
+
+fn main() {
+	mut mac := hmac.new_hmac(sha256.new, 'secret key'.bytes())
+	mut tag := []u8{len: mac.size()}
+	for message in ['first message', 'second message'] {
+		mac.write(message.bytes())!
+		mac.sum_into(mut tag)
+		println('${message}: ${tag.hex()}')
+	}
+}
+```
+
+### Prime generation
+
+Use `crypto.rand.prime(bits)` to generate an odd prime with exactly `bits` bits. Its two
+highest bits are set, so multiplying two primes of the same size produces a `2 * bits`-bit
+RSA modulus. `crypto.rand.safe_prime(bits)` additionally requires `(p - 1) / 2` to be prime
+and is considerably slower. Both functions use the operating system's cryptographically
+secure random source and can return an error.
+
+```v
+import crypto.rand
+
+fn main() {
+	p := rand.prime(256)!
+	safe := rand.safe_prime(256)!
+	assert p.bit_len() == 256
+	assert safe.bit_len() == 256
+}
+```
+
 ### Constant-time comparisons
 
 Use `crypto.subtle` for low-level helpers whose running time does not depend on secret data:
@@ -99,21 +147,27 @@ fn main() {
 }
 
 fn make_token(secret string) string {
-	header :=
-		base64.url_encode(json2.encode(JwtHeader{'HS256', 'JWT'}, escape_unicode: true).bytes())
+	header := base64.url_encode(
+		json2.encode(JwtHeader{'HS256', 'JWT'}, escape_unicode: true).bytes(),
+	)
 	payload := base64.url_encode(json2.encode(JwtPayload{'1234567890', 'John Doe', 1516239022},
 		escape_unicode: true
 	).bytes())
-	signature := base64.url_encode(hmac.new(secret.bytes(), '${header}.${payload}'.bytes(),
-		sha256.sum, sha256.block_size))
+	signature := base64.url_encode(
+		hmac.new(secret.bytes(), '${header}.${payload}'.bytes(), sha256.sum, sha256.block_size),
+	)
 	jwt := '${header}.${payload}.${signature}'
 	return jwt
 }
 
 fn auth_verify(secret string, token string) bool {
 	token_split := token.split('.')
-	signature_mirror := hmac.new(secret.bytes(), '${token_split[0]}.${token_split[1]}'.bytes(),
-		sha256.sum, sha256.block_size)
+	signature_mirror := hmac.new(
+		secret.bytes(),
+		'${token_split[0]}.${token_split[1]}'.bytes(),
+		sha256.sum,
+		sha256.block_size,
+	)
 	signature_from_token := base64.url_decode(token_split[2])
 	return hmac.equal(signature_from_token, signature_mirror)
 }

@@ -9,8 +9,6 @@ const ppc64_architecture = int(11)
 
 type ClosureGetDataFn = fn () voidptr
 
-type ClosureInitFn = fn ()
-
 type ClosureDataDropFn = fn (voidptr)
 
 struct ClosurePage {
@@ -548,6 +546,14 @@ fn closure_lifetime_reclaim_no_lock(mut state ClosureLifetimeState, retain int) 
 }
 
 fn closure_ensure_initialized() {
+	$if race ? {
+		// The once-initialization locks a global mutex on every call; like the closure
+		// allocator's mutex, it must not order the threads that create closures.
+		racedisable()
+		closure_init_once_platform()
+		raceenable()
+		return
+	}
 	closure_init_once_platform()
 }
 
@@ -797,7 +803,7 @@ fn closure_init_body() {
 		}
 		g_closure.closure_get_data = unsafe { ClosureGetDataFn(desc) }
 	} else {
-		g_closure.closure_get_data = g_closure.closure_ptr
+		g_closure.closure_get_data = unsafe { ClosureGetDataFn(g_closure.closure_ptr) }
 	}
 
 	// Advance allocation pointer past header

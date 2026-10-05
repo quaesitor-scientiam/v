@@ -798,8 +798,10 @@ fn test_rmdir_not_exist() ! {
 	dir := 'non_existing_dir'
 	assert !os.exists(dir)
 	os.rmdir(dir) or {
-		// 0x00000002 is both ENOENT in POSIX and ERROR_FILE_NOT_FOUND in Win32 API
-		assert err.code() == 0x00000002
+		// ENOENT on POSIX and ERROR_FILE_NOT_FOUND on Windows have the same
+		// value, which is why one constant covers both.
+		assert err.code() == os.error_code_noent
+		assert os.is_not_exist(err)
 	}
 	assert !os.exists(dir)
 }
@@ -1107,8 +1109,7 @@ fn test_execute() {
 	defer {
 		os.rm(print0script) or {}
 	}
-	result :=
-		os.execute('${os.quoted_path(@VEXE)} -old-compiler run ${os.quoted_path(print0script)}')
+	result := os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(print0script)}')
 	hexresult := result.output.hex()
 	// println('exit_code: ${result.exit_code}')
 	// println('output: |${result.output}|')
@@ -1135,7 +1136,7 @@ fn test_exec_with_args() {
 		os.rm(output_arg + '.c') or {}
 	}
 	compile_result :=
-		os.execute('${os.quoted_path(@VEXE)} -o ${os.quoted_path(output_arg)} ${os.quoted_path(source_path)}')
+		os.exec([@VEXE, '-o', output_arg, source_path])
 	assert compile_result.exit_code == 0, compile_result.output
 
 	result := os.exec([exe_path, 'one two', 'semi;colon'])
@@ -1191,7 +1192,7 @@ fn test_execute_pipe_into_vfmt() {
 	result :=
 		os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(producer_script)} | ${os.quoted_path(@VEXE)} fmt')
 	assert result.exit_code == 0, result.output
-	assert result.output.replace('\r\n', '\n') == 'fn main() {\n\tprintln(1)\n}\n'
+	assert result.output.replace('\r\n', '\n') == 'fn main() { println(1) }\n'
 }
 
 fn test_execute_fc_get_output() {
@@ -1279,9 +1280,10 @@ fn move_across_partitions_using_function(f fn (src string, dst string, opts os.M
 	├── mountpoint
 	└── original.txt
 	*/
-	os.system('${bindfs} --no-allow-other ${cfolder} ${mfolder}')
+	os.system_args([bindfs, '--no-allow-other', cfolder, mfolder])
 	defer {
-		os.system('sync; umount ${mfolder}')
+		os.system_args(['sync'])
+		os.system_args(['umount', mfolder])
 	}
 	// os.system('tree ${pfolder}')
 	/*

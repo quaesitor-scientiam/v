@@ -6,6 +6,17 @@ regardless of the DB driver you decide to use.
 Driver authors using the shared SQL generators can target SQLite, PostgreSQL, MySQL, and
 H2-backed connections with the built-in ORM dialect helpers.
 
+## Deprecation notice: orm_fn
+
+> [!WARNING]
+> The Function Call API (`orm_fn`; `orm.new_query[T]` / `QueryBuilder`) is
+> deprecated and will be removed from the standard library after
+> **2027-08-17**, to be maintained in a separate repository. Prefer the
+> built-in `sql` ORM syntax for new code.
+> Compiler deprecation warnings begin on **2027-02-18**, six months before
+> the removal date; until then the compiler emits a migration notice.
+> See https://github.com/vlang/v/issues/27001 for details.
+
 ## Nullable
 
 For a nullable column, use an option field. If the field is non-option, the column will be defined
@@ -40,13 +51,39 @@ struct Foo {
 - `[sql_type: 'SQL TYPE']` explicitly sets the type in SQL
 - `[sql_select: 'SQL expression']` uses a custom expression in `SELECT` for the field
 - `[default: 'raw_sql']` inserts `raw_sql` verbatim in a "DEFAULT" clause when
-  creating a new table, allowing for SQL functions like `CURRENT_TIME`. For raw strings,
-  surround `raw_sql` with backticks (\`).
+  creating a new table, allowing for SQL functions like `CURRENT_TIME`.
+  A plain string default has to be surrounded with backticks (\`), so that it is
+  emitted as a properly quoted (and escaped) SQL string literal instead:
+  `[default: '\`/dashboard\`']` produces `DEFAULT '/dashboard'`, while
+  `[default: 'CURRENT_TIME']` produces `DEFAULT CURRENT_TIME`.
+  Single quotes are doubled for you. A backslash is kept verbatim, except on
+  MySQL, where a backslash is rejected with an error: its meaning there depends
+  on the server's `NO_BACKSLASH_ESCAPES` sql_mode, which cannot be known while
+  generating the DDL. Use `sql_type` with an explicit `DEFAULT` clause for that
+  case.
 
 - `[fkey: 'parent_id']` sets foreign key for an field which holds an array
 - `[references]` or `[references: 'tablename']` or `[references: 'tablename(field_id)']`
 - `[comment: 'field_comment']` set comment
 - `[index]` creates index
+
+## Queries in array callbacks
+
+`sql` expressions inside array callbacks can use the current `it`, including fields
+such as `it.id`. Nested callbacks use their own `it` binding.
+
+Static `where` values can use function calls, member access and indexing. Structs and
+containers can be intermediate receivers, but the final value must be a primitive type,
+an enum or `time.Time`. For example, `make_holders()[0].name` can bind a string field,
+while `make_holders()[0]` cannot bind the whole struct. Option and Result receivers must
+be unwrapped with an `or` fallback before accessing their members or elements.
+Methods declared on collection aliases, including inherited alias methods, use their
+declared return types when checking the final value. Private alias methods remain
+accessible only within their declaring module, following ordinary method visibility rules.
+Alias conversions also follow type visibility. These checks apply during `-check` and compilation.
+Alias methods follow the same visibility and return type rules through pointer receivers.
+Mutable alias methods also require a receiver eligible under ordinary V mutability rules.
+Shared alias receivers require the same read or write locks as ordinary method calls.
 
 ## Usage
 > [!NOTE]
@@ -178,6 +215,8 @@ sql db {
 ### Create & Drop Tables
 
 You can create and drop tables by passing the struct to `create table` and `drop table`.
+Table structs from imported modules can use the module name or its import alias as a qualifier.
+These references count as uses of the import, even when it is used only inside the SQL block.
 
 ```v ignore
 import models.Foo
@@ -304,9 +343,18 @@ result := sql db {
 }!
 ```
 
+Modules referenced in SQL table names or value expressions count as used imports.
+For example, `time.now()` inside an ORM `update` statement uses `import time`.
+Names inside ordinary or raw string literals and comments do not count as import usage.
+String interpolation expressions still count, such as `${time.now()}`.
+
 Dynamic ORM blocks can build `WHERE` and `SET` data conditionally. Commas between
 emitted dynamic `where` items are joined with `AND`; use `&&` and `||` inside an
-item for explicit boolean conditions.
+item for explicit boolean conditions. Values may use indexed struct fields, such as
+`name == members[0].name` or `id == members_by_name['Alice'].id`.
+
+The formatter preserves conditions, commas and comments in query-data blocks,
+including standalone `sql { ... }` declaration assignments while editing.
 
 ```v ignore
 where_filter := {
@@ -519,6 +567,16 @@ fn main() {
 ```
 
 ## Function Call API
+
+> [!WARNING]
+> This section documents the deprecated Function Call API (`orm_fn`;
+> `orm.new_query[T]` / `QueryBuilder`). It is deprecated and will be
+> removed from the standard library after **2027-08-17**, to be maintained
+> in a separate repository. Prefer the built-in `sql` ORM syntax for new
+> code. Compiler warnings begin on **2027-02-18**; until then the compiler
+> emits a migration notice. See https://github.com/vlang/v/issues/27001 for
+> details.
+
 You can utilize the `Function Call API` to work with `ORM`. It provides the
 capability to dynamically construct SQL statements. The Function Call API
 supports common operations such as `Create Table`/`Drop Table`/`Insert`/`Delete`/`Update`/`Select`,

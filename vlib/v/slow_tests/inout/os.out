@@ -1,8 +1,12 @@
 c_and_v_type_interoperability.md
 codelite.md
+compiler-fallback.md
+comptime-reflection-sources.md
 docs.md
+function-field-calls.md
 ownership.md
 packaging_v_for_distributions.md
 tccbin_automation.md
+translated_fixed_array_c_abi.md
 upcoming.md
 vscode.md

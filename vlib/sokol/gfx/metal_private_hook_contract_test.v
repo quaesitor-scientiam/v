@@ -41,7 +41,7 @@ fn metal_hook_body(source string, signature string) string {
 }
 
 fn metal_hook_run(command string) string {
-	result := os.execute(command)
+	result := os.exec(os.split_args(command) or { panic(err) })
 	assert result.exit_code == 0, '`${command}` failed (${result.exit_code}):\n${result.output}'
 	return result.output.trim_space()
 }
@@ -90,7 +90,7 @@ fn test_metal_private_hook_order_and_scope() {
 	declaration_source := metal_hook_source(os.join_path(@VEXEROOT, 'vlib', 'sokol', 'c',
 		'declaration.c.v'))
 	assert declaration_source.count('-D${metal_hook_define}') == 1
-	assert declaration_source.contains('$if gg_multiwindow ? {\n\t\t\t#flag darwin -D${metal_hook_define}')
+	assert declaration_source.contains('\$if gg_multiwindow ? {\n\t\t\t#flag darwin -D${metal_hook_define}')
 	assert !metal_hook_body(header, 'typedef struct sg_desc').contains('v_sokol_')
 }
 

@@ -61,8 +61,7 @@ fn test_simple() {
 	assert lcov.exit_code == 0, lcov.str()
 	assert os.exists(lcov_file), lcov_file
 	lcov_content := os.read_file(lcov_file) or { panic(err) }
-	assert lcov_content.contains('SF:${np(os.join_path(vroot,
-		'cmd/tools/vcover/testdata/simple/simple.v'))}')
+	assert lcov_content.contains('SF:${np(os.join_path(vroot, 'cmd/tools/vcover/testdata/simple/simple.v'))}')
 	assert lcov_content.contains('DA:4,1')
 	assert lcov_content.contains('DA:12,0')
 	assert lcov_content.contains('LF:9')
@@ -128,5 +127,5 @@ fn test_simple() {
 
 fn execute(cmd string) os.Result {
 	eprintln('Executing: ${cmd}')
-	return os.execute(cmd)
+	return os.exec(os.split_args(cmd) or { panic(err) })
 }

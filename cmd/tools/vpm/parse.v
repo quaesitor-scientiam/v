@@ -6,9 +6,12 @@ import v.vmod
 
 struct Module {
 mut:
-	name               string
-	url                string
-	version            string // specifies the requested version.
+	name    string
+	url     string
+	version string // specifies the requested version.
+	// requested is the dependency string the module was parsed from, as it is
+	// written in the `v.mod` or on the command line, including any `@version`.
+	requested          string
 	tmp_path           string
 	install_path       string
 	install_path_fmted string
@@ -36,15 +39,17 @@ enum ModuleKind {
 	local
 }
 
-fn parse_query(query []string, mut selector VpmInstallServerSelector) []Module {
+// parse_query resolves the modules of `query` and their dependencies. It
+// returns them together with the number of modules that failed to resolve.
+fn parse_query(query []string, mut selector VpmInstallServerSelector, mut scope LockScope) ([]Module, int) {
 	mut p := Parser{}
 	for m in query {
-		p.parse_module(m, mut selector)
+		p.parse_module(m, mut selector, mut scope)
 	}
 	if p.errors > 0 && p.errors == query.len {
 		exit(1)
 	}
-	return p.modules.values()
+	return p.modules.values(), p.errors
 }
 
 fn (mut p Parser) lookup_registered_name_for_url(manifest_name string, ident string, mut selector VpmInstallServerSelector) ?string {
@@ -77,7 +82,7 @@ fn (mut p Parser) lookup_registered_name_for_url(manifest_name string, ident str
 	return none
 }
 
-fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) {
+fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector, mut scope LockScope) {
 	kind := match true {
 		m.starts_with('https://') { ModuleKind.https }
 		m.starts_with('git@') { ModuleKind.ssh }
@@ -129,17 +134,18 @@ fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) 
 				exit(1)
 			}
 		}
-		tmp_path := get_tmp_path(os.join_path(publisher, name, version)) or {
+		tmp_path := get_tmp_path(settings.tmp_path, os.join_path(publisher, name, version)) or {
 			vpm_error('failed to get temporary directory for `${ident}`.', details: err.msg())
 			p.errors++
 			return
 		}
-		settings.vcs.clone(ident, version, tmp_path) or {
+		clone_module_source(settings.vcs, m, ident, version, tmp_path, mut scope) or {
 			vpm_error('failed to install `${ident}`.', details: err.msg())
+			rmdir_all(tmp_path) or {}
 			p.errors++
 			return
 		}
-		manifest := get_manifest(tmp_path) or {
+		manifest := vmod.from_file(os.join_path(tmp_path, 'v.mod')) or {
 			vpm_error('failed to find `v.mod` for `${ident}${at_version(version)}`.',
 				details: err.msg()
 			)
@@ -157,14 +163,13 @@ fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) 
 		mod_path := if registered_name != '' {
 			normalize_mod_path(final_name.replace('.', os.path_separator))
 		} else {
-			normalize_mod_path(os.join_path(if kind == .http { publisher } else { '' },
-				manifest.name))
+			direct_install_mod_path(if kind == .http { publisher } else { '' }, manifest.name)
 		}
 		Module{
 			name:         final_name
 			url:          ident
 			version:      version
-			install_path: os.real_path(os.join_path(settings.vmodules_path, mod_path))
+			install_path: os.abs_path(os.join_path(settings.vmodules_path, mod_path))
 			is_external:  true
 			tmp_path:     tmp_path
 			manifest:     manifest
@@ -193,17 +198,18 @@ fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) 
 			return
 		}
 		mod_path := normalize_mod_path(info.name.replace('.', os.path_separator))
-		tmp_path := get_tmp_path(os.join_path(mod_path, version)) or {
+		tmp_path := get_tmp_path(settings.tmp_path, os.join_path(mod_path, version)) or {
 			vpm_error('failed to get temporary directory for `${ident}`.', details: err.msg())
 			p.errors++
 			return
 		}
-		vcs.clone(info.url, version, tmp_path) or {
+		clone_module_source(vcs, m, info.url, version, tmp_path, mut scope) or {
 			vpm_error('failed to install `${ident}`.', details: err.msg())
+			rmdir_all(tmp_path) or {}
 			p.errors++
 			return
 		}
-		manifest := get_manifest(tmp_path) or {
+		manifest := vmod.from_file(os.join_path(tmp_path, 'v.mod')) or {
 			// Add link with issue template requesting to add a manifest.
 			mut details := ''
 			new_issue_url := '${info.url}/issues/new'
@@ -223,18 +229,19 @@ fn (mut p Parser) parse_module(m string, mut selector VpmInstallServerSelector) 
 			url:          info.url
 			version:      version
 			vcs:          vcs
-			install_path: os.real_path(os.join_path(settings.vmodules_path, mod_path))
+			install_path: os.abs_path(os.join_path(settings.vmodules_path, mod_path))
 			tmp_path:     tmp_path
 			manifest:     manifest
 		}
 	}
 	mod.install_path_fmted = fmt_mod_path(mod.install_path)
+	mod.requested = m
 	mod.get_installed()
 	p.modules[key] = mod
 	if mod.manifest.dependencies.len > 0 {
 		verbose_println('Found ${mod.manifest.dependencies.len} dependencies for `${mod.name}`: ${mod.manifest.dependencies}.')
 		for d in mod.manifest.dependencies {
-			p.parse_module(d, mut selector)
+			p.parse_module(d, mut selector, mut scope)
 		}
 	}
 }
@@ -259,15 +266,10 @@ fn is_local_repository(query string) bool {
 		if os.exists(path) {
 			// A bare relative name like `vsl` is ambiguous: it might be a
 			// registered VPM module, or a like-named local directory in the
-			// caller's cwd. If the candidate resolves to a path inside
-			// `settings.vmodules_path`, it is just a previously installed
-			// module shadowing the registered name — don't treat it as a
-			// local repository. This keeps `v install vsl@<tag>` working when
-			// cwd happens to be the vmodules directory (the test setup for
-			// versioned installs does exactly this).
-			abs := os.real_path(path)
+			// caller's cwd.
+			abs_path := os.real_path(path)
 			vmodules_real := os.real_path(settings.vmodules_path)
-			if abs.starts_with(vmodules_real + os.path_separator) || abs == vmodules_real {
+			if path_shadows_installed_module(abs_path, vmodules_real, settings.is_local) {
 				continue
 			}
 			return true
@@ -276,8 +278,30 @@ fn is_local_repository(query string) bool {
 	return false
 }
 
+// A path inside the module store is a previously installed module shadowing the
+// registered name, not a repository to clone: that keeps `v install vsl@<tag>`
+// working when cwd happens to be the module store (the test setup for versioned
+// installs does exactly this). Under `--local` that store is the project itself,
+// where only what VPM installed there is an installed module -- the directories
+// the project keeps are local repositories like anyone else's.
+fn path_shadows_installed_module(abs_path string, vmodules_real string, is_local bool) bool {
+	if abs_path == vmodules_real {
+		return true
+	}
+	if !abs_path.starts_with(vmodules_real + os.path_separator) {
+		return false
+	}
+	return !is_local || is_recorded_local_install(abs_path)
+}
+
 fn (mut m Module) get_installed() {
-	refs := os.execute_opt('git ls-remote --refs ${m.install_path}') or { return }
+	if m.url != '' && !m.existing_checkout_matches_source() {
+		return
+	}
+	refs := os.exec(['git', 'ls-remote', '--refs', m.install_path])
+	if refs.exit_code != 0 {
+		return
+	}
 	vpm_log(@FILE_LINE, @FN, 'refs: ${refs}')
 	m.is_installed = true
 	// In case the head just temporarily matches a tag, make sure that there
@@ -297,12 +321,92 @@ fn (mut m Module) get_installed() {
 	}
 }
 
-fn get_tmp_path(relative_path string) !string {
-	tmp_path := os.real_path(os.join_path(settings.tmp_path, relative_path))
-	if os.exists(tmp_path) {
-		// It's unlikely that the tmp_path already exists, but it might
-		// occur if vpm was canceled during an installation or update.
-		rmdir_all(tmp_path)!
+fn (m Module) existing_checkout_matches_source() bool {
+	if !os.is_dir(m.install_path) {
+		return false
 	}
-	return tmp_path
+	vcs := m.vcs or { settings.vcs }
+	existing_url := match vcs {
+		.git {
+			result := os.exec_opt(['git', '-C', m.install_path, 'remote', 'get-url', 'origin']) or {
+				return false
+			}
+			result.output.trim_space()
+		}
+		.hg {
+			result := os.exec_opt(['hg', '-R', m.install_path, 'paths', 'default']) or {
+				return false
+			}
+			result.output.trim_space()
+		}
+	}
+	return normalized_clone_source(existing_url) == normalized_clone_source(m.url)
+}
+
+fn normalized_clone_source(raw_source string) string {
+	raw := raw_source.trim_space()
+	local_path := os.expand_tilde_to_home(raw.trim_string_left('file://'))
+	if raw.starts_with('file://') || os.is_abs_path(local_path) || raw.starts_with('./')
+		|| raw.starts_with('../') || raw.starts_with('~/') || os.exists(local_path) {
+		return 'file://' + os.real_path(local_path)
+	}
+	return normalize_clone_source_url(raw) or { raw.trim_string_right('.git') }
+}
+
+fn get_tmp_path(unresolved_tmp_root string, relative_path string) !string {
+	if os.is_abs_path(relative_path) {
+		return error('temporary path `${relative_path}` is absolute')
+	}
+	if relative_path_has_parent_segment(relative_path) {
+		return error('temporary path `${relative_path}` contains a `..` segment')
+	}
+	joined := os.join_path(unresolved_tmp_root, relative_path)
+	if !nearest_tmp_ancestor_is_inside(unresolved_tmp_root, joined) {
+		return error('temporary path `${joined}` is outside `${os.real_path(unresolved_tmp_root)}`')
+	}
+	candidate := os.real_path(joined)
+	if !os.exists(candidate) {
+		return candidate
+	}
+	tmp_root := os.real_path(unresolved_tmp_root)
+	if !path_is_below(candidate, tmp_root) {
+		return error('temporary path `${candidate}` is outside `${tmp_root}`')
+	}
+	// It's unlikely that the tmp_path already exists, but it might
+	// occur if vpm was canceled during an installation or update.
+	rmdir_all(candidate)!
+	return candidate
+}
+
+// The nearest existing directory at or below the temp root. A missing final
+// component does not hide a symlink in the parent: real_path of that full
+// path fails and returns the unresolved string.
+fn nearest_tmp_ancestor_is_inside(unresolved_tmp_root string, path string) bool {
+	tmp_root := os.real_path(unresolved_tmp_root)
+	mut current := path
+	for current != unresolved_tmp_root && current != tmp_root {
+		if os.exists(current) {
+			resolved := os.real_path(current)
+			return resolved == tmp_root || path_is_below(resolved, tmp_root)
+		}
+		parent := os.dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+	if !os.exists(current) {
+		return true
+	}
+	resolved := os.real_path(current)
+	return resolved == tmp_root || path_is_below(resolved, tmp_root)
+}
+
+fn relative_path_has_parent_segment(relative_path string) bool {
+	for segment in relative_path.split_any('/\\') {
+		if segment == '..' {
+			return true
+		}
+	}
+	return false
 }

@@ -467,8 +467,8 @@ pub fn (mut p Parser) allocate_table(key DottedKey) ! {
 // sub_table_key returns the logic parts of a dotted key (`a.b.c`) for
 // use with the `find_sub_table` method.
 pub fn (mut p Parser) sub_table_key(key DottedKey) (DottedKey, DottedKey) {
-	last := [key.last()]
-	first := key[..key.len - 1]
+	last := DottedKey([key.last()])
+	first := DottedKey(key[..key.len - 1])
 	return first, last
 }
 
@@ -554,9 +554,10 @@ fn is_all_tables(table map[string]ast.Value, dotted_key DottedKey) bool {
 // If the state key does not exist find_array_in_table will return an error.
 pub fn (mut p Parser) find_array_of_tables() ![]ast.Value {
 	mut t := unsafe { &p.root_map }
-	mut key := p.last_aot
-	if key.len > 1 {
-		key = DottedKey([key[0]])
+	key := if p.last_aot.len > 1 {
+		DottedKey([p.last_aot[0]])
+	} else {
+		p.last_aot
 	}
 	util.printdbg(@MOD + '.' + @STRUCT + '.' + @FN, 'locating "${key}" in map ${ptr_str(t)}')
 	unsafe {
@@ -1829,7 +1830,7 @@ pub fn (mut p Parser) time() !ast.Time {
 	if !lit[lit.len - 1].is_digit() {
 		return error(@MOD + '.' + @STRUCT + '.' + @FN +
 			' expected a number as last occurrence in "${lit}" got "${lit[lit.len -
-			1].ascii_str()}"')
+				1].ascii_str()}"')
 	}
 
 	// Parse offset

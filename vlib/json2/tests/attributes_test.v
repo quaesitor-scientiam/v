@@ -18,6 +18,12 @@ struct StruWithJsonSkipAttribute {
 	b    int
 }
 
+struct StruWithSkippedSharedFields {
+	name      string
+	data      shared string @[skip]
+	json_data shared string @[json: '-']
+}
+
 struct StruWithOmitemptyAttribute {
 	a    int
 	name ?string @[omitempty]
@@ -96,7 +102,14 @@ fn test_skip_and_rename_attributes() {
 		b:    3
 	}, " `json: '-'` skip attribute not working"
 
+	// `omitempty` only affects encoding, so an explicit empty value is still decoded.
 	assert json.decode[StruWithOmitemptyAttribute]('{"name": "", "a": 2, "b": 3}')! == StruWithOmitemptyAttribute{
+		a:    2
+		name: ''
+		b:    3
+	}, '`omitempty` attribute not working'
+
+	assert json.decode[StruWithOmitemptyAttribute]('{"a": 2, "b": 3}')! == StruWithOmitemptyAttribute{
 		a:    2
 		name: none
 		b:    3
@@ -107,6 +120,17 @@ fn test_skip_and_rename_attributes() {
 		name: 'hola'
 		b:    3
 	}, '`omitempty` attribute not working'
+}
+
+fn test_decode_skipped_shared_fields() {
+	value := StruWithSkippedSharedFields{
+		name:      'foo'
+		data:      'bar'
+		json_data: 'baz'
+	}
+	assert json.encode(value) == '{"name":"foo"}'
+	decoded := json.decode[StruWithSkippedSharedFields]('{"name":"foo","data":"ignored","json_data":"ignored"}')!
+	assert decoded.name == value.name
 }
 
 fn test_raw_attribute() {

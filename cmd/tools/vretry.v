@@ -10,6 +10,29 @@ mut:
 	retries   int
 }
 
+// arg_needs_no_quoting reports whether `arg` survives a trip through the shell
+// unchanged. Everything else is quoted rather than enumerated, so a character that
+// is special on only some shells is still handled.
+fn arg_needs_no_quoting(arg string) bool {
+	if arg.len == 0 {
+		return false
+	}
+	for c in arg {
+		if c.is_alnum() || c in [`_`, `-`, `.`, `/`, `:`, `=`, `@`, `+`, `,`, `%`] {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// seconds_to_duration converts a fractional number of seconds, as given on the
+// command line, to a Duration. The scaling is done in floating point so that a
+// value like `--delay 0.5` keeps its sub-second part.
+fn seconds_to_duration(seconds f64) time.Duration {
+	return time.Duration(i64(seconds * f64(time.second)))
+}
+
 fn main() {
 	mut context := Context{}
 	args := os.args#[1..]
@@ -22,10 +45,10 @@ fn main() {
 	fp.skip_executable()
 	fp.limit_free_args_to_at_least(1)!
 	context.show_help = fp.bool('help', `h`, false, 'Show this help screen.')
-	context.timeout = fp.float('timeout', `t`, 900.0,
-		'Timeout in seconds (for all retries). Default: 900.0 seconds (15 minutes).') * time.second
-	context.delay = fp.float('delay', `d`, 1.0,
-		'Delay between each retry in seconds. Default: 1.0 second.') * time.second
+	context.timeout = seconds_to_duration(fp.float('timeout', `t`, 900.0,
+		'Timeout in seconds (for all retries). Default: 900.0 seconds (15 minutes).'))
+	context.delay = seconds_to_duration(fp.float('delay', `d`, 1.0,
+		'Delay between each retry in seconds. Default: 1.0 second.'))
 	context.retries = fp.int('retries', `r`, 10, 'Maximum number of retries. Default: 10.')
 	if context.show_help {
 		println(fp.usage())
@@ -35,8 +58,9 @@ fn main() {
 		eprintln('error: ${err}')
 		exit(1)
 	}
+	// Vector-form commands retain their literal arguments. The string form explicitly
+	// requests shell syntax and is passed to the selected shell unchanged.
 	cmd := command_args.join(' ')
-	// dump(cmd)
 
 	spawn fn (context Context) {
 		time.sleep(context.timeout)
@@ -46,7 +70,13 @@ fn main() {
 
 	mut res := 0
 	for i in 0 .. context.retries {
-		res = os.system(cmd)
+		res = os.system_args(if fp.idx_dashdash >= 0 {
+			command_args
+		} else if os.user_os() == 'windows' {
+			['cmd.exe', '/d', '/s', '/c', cmd]
+		} else {
+			['sh', '-c', cmd]
+		})
 		if res == 0 {
 			break
 		}

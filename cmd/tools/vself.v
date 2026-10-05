@@ -9,7 +9,7 @@ import v.util.vflags
 const args_ = arguments()
 const is_debug = args_.contains('-debug')
 const full_v_cli_source = 'cmd/v'
-const standalone_v3_source = 'vlib/v3/v3.v'
+const standalone_v3_source = 'vlib/v/v.v'
 
 // support a renamed `v` executable too:
 const vexe = os.getenv_opt('VEXE') or { @VEXE }
@@ -29,6 +29,7 @@ fn main() {
 	recompilation.must_be_enabled(vroot, 'Please install V from source, to use `${vexe_name} self` .')
 	os.chdir(vroot)!
 	os.setenv('VCOLORS', 'always', true)
+	host_os := self_build_host_os()
 	command_index := os.getenv('VSELF_COMMAND_INDEX').int()
 	os.unsetenv('VSELF_COMMAND_INDEX')
 	repeat_count, mut args := extract_repeat_count(args_[1..], command_index)
@@ -44,17 +45,20 @@ fn main() {
 	}
 	if !fastc_self_build && !has_self_build_configuration_arg(effective_args) {
 		// compiling by default, i.e. `v self`:
-		uos := os.user_os()
-		uname := os.uname()
-		if uos == 'macos' {
+		unam := os.uname()
+		if host_os == 'macos' {
 			// Apple Silicon's bundled TCC is much faster for compiler rebuilds. The
 			// generated compiler uses pthread-backed allocator state because native
 			// TinyCC TLS is not reliable on macOS.
-			default_cc := if uname.machine in ['arm64', 'aarch64'] { 'tcc' } else { 'cc' }
+			default_cc := if unam.machine in ['arm64', 'aarch64'] { 'tcc' } else { 'cc' }
 			args << ['-cc', os.getenv_opt('CC') or { default_cc }]
-		} else if uos == 'linux' && uname.machine in ['arm64', 'aarch64'] {
+		} else if host_os == 'linux' && unam.machine in ['arm64', 'aarch64'] {
 			// Bundled TCC can hang while bootstrapping V on Linux ARM64, so
 			// prefer the system compiler for self-builds there.
+			args << ['-cc', os.getenv_opt('CC') or { 'cc' }]
+		} else if host_os in ['freebsd', 'openbsd', 'netbsd', 'dragonfly'] {
+			// Keep the ordinary BSD self-build on the platform's system toolchain.
+			// Explicit TinyCC builds use the preallocation-compatible pthread slot.
 			args << ['-cc', os.getenv_opt('CC') or { 'cc' }]
 		}
 	}
@@ -62,12 +66,27 @@ fn main() {
 		args << ['-gc', 'none']
 	}
 	effective_args = effective_self_build_args(args)
-	if !fastc_self_build && os.user_os() in ['linux', 'macos']
-		&& self_build_supports_prealloc(effective_args) && !has_prealloc_arg(effective_args) {
+	if !fastc_self_build && '-prod' in effective_args && '-no-memory-limit' !in effective_args
+		&& '--no-memory-limit' !in effective_args {
+		// Production C generation for the embedded V3 compiler can legitimately
+		// exceed V3's default 10 GB process limit before the native compiler starts.
+		args << '-no-memory-limit'
+	}
+	effective_args = effective_self_build_args(args)
+	if !fastc_self_build && self_build_supports_prealloc(effective_args, host_os)
+		&& !has_prealloc_arg(effective_args) {
 		// The embedded V3 compiler uses disposable preallocation scopes. Pass the
 		// flag explicitly so the first `v up` built by an older compiler gets
 		// the bounded-memory implementation too.
 		args << '-prealloc'
+	}
+	// A replacement compiler has to be built entirely from the checked-out sources.
+	// Reusing a whole-program cache entry here can carry stale checker/codegen state
+	// from the compiler that is being replaced into a binary that reports the new hash.
+	effective_args = effective_self_build_args(args)
+	if '-nocache' !in effective_args && '--no-cache' !in effective_args {
+		args << '-nocache'
+		effective_args = effective_self_build_args(args)
 	}
 	obinary := self_build_output(args)
 	if fastc_self_build && repeat_count > 1 && obinary == '' {
@@ -86,7 +105,12 @@ fn main() {
 		compile_args << '-selfhost'
 	}
 	final_binary := if obinary != '' { obinary } else { 'v2' }
-	pgo_cc_kind := if fastc_self_build { '' } else { pgo_compiler_kind(args) }
+	// A production self-build compiles the compiler once, as a single C unit that the
+	// C compiler optimizes as a whole: parallel units leave every call between two of
+	// them out of line. The three-pass profile-guided cycle would build the large V3
+	// compiler three times.
+	single_prod_build := '-prod' in effective_args
+	pgo_cc_kind := if fastc_self_build || single_prod_build { '' } else { pgo_compiler_kind(args) }
 	// Only explicit FastC builds are standalone. Regular replacements must retain
 	// cmd/v so commands such as self, up, fmt, and version remain available.
 	compilation_source := if fastc_self_build { standalone_v3_source } else { full_v_cli_source }
@@ -196,13 +220,14 @@ fn unsupported_fastc_repeat_args(args []string) []string {
 				'-gc' { value == 'none' }
 				else { false }
 			}
+
 			if !supported {
 				unsupported << '${arg} ${value}'
 			}
 			i += 2
 			continue
 		}
-		if arg in ['-silent', '-keepc'] {
+		if arg in ['-silent', '-keepc', '-nocache'] {
 			i++
 			continue
 		}
@@ -297,8 +322,8 @@ fn has_prealloc_arg(args []string) bool {
 	return args.any(it in ['-prealloc', '-no-prealloc'])
 }
 
-fn self_build_supports_prealloc(args []string) bool {
-	mut target_os := os.user_os()
+fn self_build_supports_prealloc(args []string, host_os string) bool {
+	mut target_os := host_os
 	mut ccompiler := ''
 	mut gc := 'none'
 	mut i := 0
@@ -330,15 +355,18 @@ fn self_build_supports_prealloc(args []string) bool {
 		}
 		i++
 	}
-	return target_os in ['linux', 'macos'] && gc == 'none'
-		&& self_ccompiler_supports_prealloc(ccompiler, target_os)
+	return gc == 'none' && self_ccompiler_supports_prealloc(ccompiler, target_os)
 }
 
 fn self_ccompiler_supports_prealloc(ccompiler string, target_os string) bool {
 	cc := os.file_name(ccompiler.trim_space()).to_lower_ascii()
+	// Windows defaults to bundled TCC when no compiler is explicit.
+	if target_os == 'windows' && cc == '' {
+		return false
+	}
 	is_tinyc := cc.contains('tcc') || cc.contains('tinyc') || cc.contains('tinygcc')
 		|| cc.contains('tiny_gcc') || cc.contains('tiny-gcc')
-	return !is_tinyc || target_os == 'macos'
+	return !is_tinyc || target_os in ['macos', 'freebsd', 'openbsd', 'netbsd', 'dragonfly']
 }
 
 fn has_profile_cflag(args []string) bool {
@@ -369,6 +397,11 @@ fn pgo_compiler_kind(args []string) string {
 	if '-prod' !in args || '-no-prod-options' in args {
 		return ''
 	}
+	// A parallel self-build trades optimization for build time. PGO would compile
+	// that compiler three times and erase the gain from splitting C compilation.
+	if '-parallel-cc' in args {
+		return ''
+	}
 	if os.user_os() == 'windows' {
 		return ''
 	}
@@ -382,7 +415,7 @@ fn pgo_compiler_kind(args []string) string {
 	cc_file_name := os.file_name(ccompiler)
 	if cc_file_name.contains('clang') || cc_file_name.contains('gcc')
 		|| cc_file_name.contains('g++') || ccompiler == 'cc' {
-		cc_ver := os.execute('${os.quoted_path(ccompiler)} --version').output
+		cc_ver := os.exec([ccompiler, '--version']).output
 		if cc_ver.contains('clang') {
 			_ := find_llvm_profdata() or { return '' }
 			return 'clang'
@@ -406,7 +439,7 @@ fn find_llvm_profdata() !string {
 		return profdata
 	}
 	$if macos {
-		xcrun_result := os.execute('xcrun --find llvm-profdata')
+		xcrun_result := os.exec(['xcrun', '--find', 'llvm-profdata'])
 		if xcrun_result.exit_code == 0 {
 			xcrun_path := xcrun_result.output.trim_space()
 			if xcrun_path != '' && os.exists(xcrun_path) {
@@ -448,6 +481,19 @@ fn clone_args(args []string) []string {
 	return cloned
 }
 
+fn self_build_host_os() string {
+	$if vself_test_windows_transition ? {
+		return 'windows'
+	}
+	$if vself_test_bsd_transition ? {
+		return 'freebsd'
+	}
+	$if vself_test_other_transition ? {
+		return 'haiku'
+	}
+	return os.user_os()
+}
+
 fn compose_v_cmd(vexe string, args []string, source string) string {
 	mut parts := []string{cap: args.len + 2}
 	parts << os.quoted_path(vexe)
@@ -459,7 +505,7 @@ fn compose_v_cmd(vexe string, args []string, source string) string {
 }
 
 fn run_cmd(cmd string) ! {
-	result := os.execute(cmd)
+	result := os.exec(os.split_args(cmd) or { panic(err) })
 	if result.exit_code != 0 {
 		return error(result.output)
 	}
@@ -469,7 +515,7 @@ fn run_cmd(cmd string) ! {
 }
 
 fn try_compile(cmd string) bool {
-	result := os.execute(cmd)
+	result := os.exec(os.split_args(cmd) or { panic(err) })
 	if result.exit_code != 0 {
 		return false
 	}
@@ -568,7 +614,7 @@ fn bootstrap_self_build(vroot string, args []string, final_binary string) ! {
 		return error('bootstrap fallback failed while building v1.\n${err.msg()}')
 	}
 	mut bootstrap_args := ['-no-parallel']
-	bootstrap_args << with_output_arg(args, bootstrap_v2)
+	bootstrap_args << with_output_arg(initial_bootstrap_args(args), bootstrap_v2)
 	bootstrap_v1_cmd := os.join_path('.', bootstrap_v1)
 	bootstrap_v2_cmd := '${os.quoted_path(bootstrap_v1_cmd)} ${bootstrap_args.join(' ')} ${os.quoted_path(full_v_cli_source)}'
 	run_cmd(bootstrap_v2_cmd) or {
@@ -582,12 +628,24 @@ fn bootstrap_self_build(vroot string, args []string, final_binary string) ! {
 	}
 }
 
+fn initial_bootstrap_args(args []string) []string {
+	// vc/v.c can be one generation behind this source tree. Its parallel C
+	// splitter predates the single-definition header protocol, and older copies
+	// may also predate V3's process-memory switch. The compiler it produces is
+	// current and receives the original arguments for the final build.
+	return args.filter(it !in ['-parallel-cc', '-no-memory-limit', '--no-memory-limit'])
+}
+
 fn bootstrap_c_cmd(cc string, out_binary string, vc_source string) string {
 	mut parts := []string{cap: 8}
 	parts << os.quoted_path(cc)
+	// Portable VC snapshots have the full V1 compiler but no embedded V3 driver.
+	parts << '-DCUSTOM_DEFINE_v1_fallback'
 	if os.user_os() == 'windows' {
+		// vc/v_win.c calls BCryptGenRandom, so -lws2_32 alone fails to link, the same
+		// way GNUmakefile and makev.bat need -lbcrypt for this snapshot.
 		parts << ['-std=c99', '-municode', '-w', '-o', os.quoted_path(out_binary),
-			os.quoted_path(vc_source), '-lws2_32']
+			os.quoted_path(vc_source), '-lws2_32', '-lbcrypt']
 	} else {
 		parts << ['-std=c99', '-w', '-o', os.quoted_path(out_binary), os.quoted_path(vc_source),
 			'-lm', '-lpthread']
@@ -602,10 +660,14 @@ fn list_folder(short_v_name string, bmessage string, message string) {
 	if bmessage != '' {
 		println(bmessage)
 	}
+	entries := os.ls('.') or { []string{} }
+	matching := entries.filter(it.starts_with(short_v_name))
 	if os.user_os() == 'windows' {
-		os.system('dir ${short_v_name}*.exe')
-	} else {
-		os.system('ls -lartd ${short_v_name}*')
+		for entry in matching.filter(it.ends_with('.exe')) {
+			println(entry)
+		}
+	} else if matching.len > 0 {
+		os.system_args(['ls', '-lartd', ...matching])
 	}
 	println(message)
 }

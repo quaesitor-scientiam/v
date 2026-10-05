@@ -18,7 +18,7 @@ mut:
 	message      string    // commit subject line
 	commit_date  time.Time // committer date (%ct); monotonic along first-parent
 	created_at   time.Time // when this benchmark was actually run
-	v_c_ms       int       // self compile to C (`cmd/v` historically, `vlib/v3/v3.v` now)
+	v_c_ms       int       // self compile to C (`cmd/v` historically, `vlib/v/v.v` now)
 	v_self_ms    int       // self compile to a binary (same source selection as v_c_ms)
 	hello_ms     int       // `v hello_world.v`  : compile a tiny program
 	vc_size_kb   int       // size of the generated v.c, in KB
@@ -109,9 +109,8 @@ fn migrate_schema(mut db sqlite.DB) ! {
 
 fn apply_migration(mut db sqlite.DB, existing map[string]bool) ! {
 	rss_columns := ['self_rss_min_kb', 'self_rss_q1_kb', 'self_rss_med_kb', 'self_rss_q3_kb',
-		'self_rss_max_kb', 'hello_rss_min_kb', 'hello_rss_q1_kb', 'hello_rss_med_kb',
-		'hello_rss_q3_kb', 'hello_rss_max_kb', 'scan_rss_kb', 'parse_rss_kb', 'check_rss_kb',
-		'cgen_rss_kb']
+		'self_rss_max_kb', 'hello_rss_min_kb', 'hello_rss_q1_kb', 'hello_rss_med_kb', 'hello_rss_q3_kb',
+		'hello_rss_max_kb', 'scan_rss_kb', 'parse_rss_kb', 'check_rss_kb', 'cgen_rss_kb']
 	for c in rss_columns {
 		if c !in existing {
 			migrate_exec(mut db,
@@ -206,7 +205,7 @@ fn stored_tip_on(db sqlite.DB, git_ref string) bool {
 	}
 	c := tip[0].vals[0]
 	res :=
-		os.execute('git -C ${os.quoted_path(vdir)} merge-base --is-ancestor ${os.quoted_path(c)} ${os.quoted_path(git_ref)}')
+		os.exec(['git', '-C', vdir, 'merge-base', '--is-ancestor', '${c}', '${git_ref}'])
 	return res.exit_code == 0
 }
 
@@ -232,7 +231,7 @@ fn normalize_ref(ref string) string {
 	// preferring the repository default, so the identity does not depend on a local
 	// branch existing.
 	up :=
-		os.execute('git -C ${os.quoted_path(vdir)} rev-parse --abbrev-ref ${os.quoted_path('${r}@{upstream}')}')
+		os.exec(['git', '-C', vdir, 'rev-parse', '--abbrev-ref', '${'${r}@{upstream}'}'])
 	if up.exit_code == 0 && up.output.trim_space() != '' {
 		upstream := up.output.trim_space()
 		// Collapse the local branch onto its upstream when the two are on one line of
@@ -252,10 +251,11 @@ fn normalize_ref(ref string) string {
 	// branch that simply lacks an upstream: the former can adopt a remote ref freely, but
 	// the latter must be proven on the same line of history before being qualified, or a
 	// diverged local branch would be silently stored under the remote's identity.
-	local_exists := os.execute('git -C ${os.quoted_path(vdir)} rev-parse --verify --quiet ${os.quoted_path('refs/heads/${r}')}').exit_code == 0
+	local_exists := os.exec(['git', '-C', vdir, 'rev-parse', '--verify', '--quiet',
+		'${'refs/heads/${r}'}']).exit_code == 0
 	for remote in ordered_remotes(remotes) {
 		cand := '${remote}/${r}'
-		if os.execute('git -C ${os.quoted_path(vdir)} rev-parse --verify --quiet ${os.quoted_path(cand)}').exit_code != 0 {
+		if os.exec(['git', '-C', vdir, 'rev-parse', '--verify', '--quiet', '${cand}']).exit_code != 0 {
 			continue
 		}
 		if !local_exists || same_line(r, cand) {
@@ -270,18 +270,17 @@ fn normalize_ref(ref string) string {
 // when either cannot be resolved (merge-base then exits >1), so an unresolvable ref is
 // never treated as sharing history.
 fn same_line(a string, b string) bool {
-	gitc := 'git -C ${os.quoted_path(vdir)}'
-	if os.execute('${gitc} merge-base --is-ancestor ${os.quoted_path(a)} ${os.quoted_path(b)}').exit_code == 0 {
+	if os.exec(['git', '-C', vdir, 'merge-base', '--is-ancestor', '${a}', '${b}']).exit_code == 0 {
 		return true
 	}
-	return os.execute('${gitc} merge-base --is-ancestor ${os.quoted_path(b)} ${os.quoted_path(a)}').exit_code == 0
+	return os.exec(['git', '-C', vdir, 'merge-base', '--is-ancestor', '${b}', '${a}']).exit_code == 0
 }
 
 // git_lines runs a git subcommand against the checkout and returns its non-empty
 // output lines.
 fn git_lines(subcmd string) []string {
 	mut out := []string{}
-	res := os.execute('git -C ${os.quoted_path(vdir)} ${subcmd}')
+	res := os.exec(['git', '-C', vdir, ...(os.split_args(subcmd) or { panic(err) })])
 	if res.exit_code == 0 {
 		for line in res.output.split_into_lines() {
 			l := line.trim_space()
@@ -298,7 +297,7 @@ fn git_lines(subcmd string) []string {
 // deterministically to the default one.
 fn ordered_remotes(remotes []string) []string {
 	mut def := 'origin'
-	res := os.execute('git -C ${os.quoted_path(vdir)} rev-parse --abbrev-ref origin/HEAD')
+	res := os.exec(['git', '-C', vdir, 'rev-parse', '--abbrev-ref', 'origin/HEAD'])
 	if res.exit_code == 0 && res.output.trim_space().contains('/') {
 		def = res.output.trim_space().all_before('/')
 	}
@@ -371,7 +370,7 @@ fn history_diverged(db sqlite.DB, ref string) bool {
 	}
 	c := tip[0].vals[0]
 	res :=
-		os.execute('git -C ${os.quoted_path(vdir)} merge-base --is-ancestor ${os.quoted_path(c)} ${os.quoted_path(ref)}')
+		os.exec(['git', '-C', vdir, 'merge-base', '--is-ancestor', '${c}', '${ref}'])
 	return res.exit_code == 1
 }
 

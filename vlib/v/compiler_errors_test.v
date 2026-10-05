@@ -134,10 +134,12 @@ fn test_all() {
 		cte_dir := '${checker_dir}/comptime_env'
 		files := get_tests_in_dir(cte_dir, false)
 		cte_tasks.add('', cte_dir, '-no-retry-compilation run', '.run.out', files, false)
-		cte_tasks.add_evars('VAR=/usr/include', '', cte_dir, '-no-retry-compilation run',
-			'.var.run.out', ['using_comptime_env.vv'], false)
-		cte_tasks.add_evars('VAR=/opt/invalid/path', '', cte_dir, '-no-retry-compilation run',
-			'.var_invalid.run.out', ['using_comptime_env.vv'], false)
+		cte_tasks.add_evars('VAR=/usr/include', '', cte_dir, '-no-retry-compilation run', '.var.run.out', [
+			'using_comptime_env.vv',
+		], false)
+		cte_tasks.add_evars('VAR=/opt/invalid/path', '', cte_dir, '-no-retry-compilation run', '.var_invalid.run.out', [
+			'using_comptime_env.vv',
+		], false)
 		cte_tasks.run()
 	}
 	mut ct_tasks := Tasks{
@@ -182,10 +184,8 @@ fn test_all() {
 	tasks.add('', global_dir, '-enable-globals', '.out', global_tests, false)
 	tasks.add('', module_dir, '-prod run', '.out', module_tests, true)
 	tasks.add('', run_dir, 'run', '.run.out', run_tests, false)
-	tasks.add('', checker_dir, '-disable-explicit-mutability run',
-		'.disable_explicit_mutability.run.out', disable_explicit_mutability_tests, false)
-	tasks.add('', checker_with_check_option_dir, '-check', '.out', checker_with_check_option_tests,
-		false)
+	tasks.add('', checker_dir, '-disable-explicit-mutability run', '.disable_explicit_mutability.run.out', disable_explicit_mutability_tests, false)
+	tasks.add('', checker_with_check_option_dir, '-check', '.out', checker_with_check_option_tests, false)
 	tasks.add('', no_closures_dir, '-no-closures run', '.out', no_closures_tests, false)
 	tasks.run()
 }
@@ -383,7 +383,13 @@ fn (mut task TaskDescription) execute() {
 		return
 	}
 	cli_cmd := task.get_cli_cmd()
-	res := os.execute(cli_cmd)
+	program := task.path
+	mut command := [task.vexe, ...(os.split_args(task.voptions) or { panic(err) }), program]
+	if task.evars != '' {
+		command.prepend(os.split_args(task.evars) or { panic(err) })
+		command.prepend('env')
+	}
+	res := os.exec(command)
 	expected_out_path := task.path.replace('.vv', '') + task.result_extension
 	task.expected_out_path = expected_out_path
 	task.cli_cmd = cli_cmd

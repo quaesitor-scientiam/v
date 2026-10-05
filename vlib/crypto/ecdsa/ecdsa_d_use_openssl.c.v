@@ -28,7 +28,12 @@ module ecdsa
 #flag windows -IC:/Program Files/OpenSSL/include
 #flag windows -LC:/Program Files/OpenSSL/lib/VC/x64/MD
 
-#flag -lcrypto
+$if msvc {
+	// OpenSSL's MSVC import library is conventionally named libcrypto.lib.
+	#flag -llibcrypto
+} $else {
+	#flag -lcrypto
+}
 
 #include <openssl/ecdsa.h>
 #include <openssl/obj_mac.h>
@@ -49,6 +54,7 @@ pub const C.NID_secp384r1 int
 pub const C.NID_secp521r1 int
 pub const C.NID_secp256k1 int
 pub const C.NID_X9_62_id_ecPublicKey int // The new opaque of public key pair high level API
+
 // EVP_PKEY_fromdata() selection flag for public-key-only material (no private
 // component) — used to reconstruct a peer's ephemeral P-256 public key from
 // the raw uncompressed point bytes carried in a TLS 1.3 key_share extension.

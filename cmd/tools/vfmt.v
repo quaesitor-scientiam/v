@@ -7,34 +7,32 @@ import os
 import os.cmdline
 import rand
 import term
-import v.ast
-import v.pref
-import v.fmt
 import v.util
+import v.vmod
 import v.util.diff
-import v.parser
-import v.help
-import v3.errors as v3errors
-import v3.flat
-import v3.gen.v as v3fmt
-import v3.parser as v3parser
-import v3.pref as v3pref
+import v.util.vflags
+import v.errors as compiler_errors
+import v.flat
+import v.gen.v as compiler_fmt
+import v.parser as compiler_parser
+import v.pref as compiler_pref
 
 struct FormatOptions {
-	is_l             bool
-	is_c             bool // Note: This refers to the '-c' fmt flag, NOT the C backend
-	is_w             bool
-	is_diff          bool
-	is_verbose       bool
-	is_debug         bool
-	is_noerror       bool
-	is_verify        bool // exit(1) if the file is not vfmt'ed
-	is_worker        bool // true *only* in the worker processes. Note: workers can crash.
-	is_backup        bool // make a `file.v.bak` copy *before* overwriting a `file.v` in place with `-w`
-	in_process       bool // do not fork a worker process; potentially faster, but more prone to crashes for invalid files
-	is_new_int       bool // rewrite int to i32 in translated modules and C declarations
-	no_migrate_json2 bool // opt out of the default rewrite of deprecated `json` usage to `json2` (`-no-migrate-json2`)
-	backend          string = 'c'
+	is_l                bool
+	is_c                bool // Note: This refers to the '-c' fmt flag, NOT the C backend
+	is_w                bool
+	is_diff             bool
+	is_verbose          bool
+	is_debug            bool
+	is_noerror          bool
+	is_verify           bool     // exit(1) if the file is not vfmt'ed
+	is_worker           bool     // true *only* in the worker processes. Note: workers can crash.
+	is_backup           bool     // make a `file.v.bak` copy *before* overwriting a `file.v` in place with `-w`
+	in_process          bool     // do not fork a worker process; potentially faster, but more prone to crashes for invalid files
+	is_new_int          bool     // rewrite int to i32 in translated modules and C declarations
+	no_migrate_json2    bool     // opt out of the default rewrite of removed `json` usage to `json2` (`-no-migrate-json2`)
+	module_search_paths []string // the expanded `-path` roots, where the compiler also looks for imported modules
+	backend             string = 'c'
 mut:
 	diff_cmd string // filled in when -diff or -verify is passed
 }
@@ -42,23 +40,29 @@ mut:
 const formatted_file_token = '\@\@\@' + 'FORMATTED_FILE: '
 const vtmp_folder = os.vtmp_dir()
 const term_colors = term.can_show_color_on_stderr()
-const legacy_vfmt_only_flags = ['-backup', '-c', '-diff', '-inprocess', '-l', '-new_int',
-	'-no-migrate-json2', '-noerror', '-verbose', '--verbose', '-verify', '-w']
 
 fn formatter_backend(args []string) !string {
 	mut backend := 'c'
 	for i, arg in args {
-		if arg in ['-b', '-backend'] && i + 1 < args.len {
-			backend = match args[i + 1] {
-				'c', 'fastc', 'wasm' {
-					args[i + 1]
-				}
-				'js', 'js_node', 'js_browser', 'js_freestanding' {
-					'js'
-				}
-				else {
-					return error('Unknown V backend: ${args[i + 1]}\nValid -backend choices are: c, fastc, js, js_node, js_browser, js_freestanding, wasm')
-				}
+		requested := if arg in ['-b', '-backend'] && i + 1 < args.len {
+			args[i + 1]
+		} else if arg.starts_with('-b=') || arg.starts_with('-backend=') {
+			arg.all_after('=')
+		} else {
+			continue
+		}
+		backend = match requested {
+			'c', 'fastc', 'wasm' {
+				requested
+			}
+			'js', 'js_node', 'js_browser', 'js_freestanding' {
+				'js'
+			}
+			'native', 'go', 'arm64', 'eval' {
+				'c'
+			}
+			else {
+				return error('Unknown V backend: ${requested}\nValid -backend choices are: c, fastc, go, js, js_node, js_browser, js_freestanding, native, arm64, eval, wasm')
 			}
 		}
 	}
@@ -72,26 +76,28 @@ fn main() {
 	// }
 	toolexe := os.executable()
 	util.set_vroot_folder(os.dir(os.dir(os.dir(toolexe))))
-	args := util.join_env_vflags_and_os_args()
+	args := vflags.join_env_vflags_and_os_args()
 	backend := formatter_backend(args) or {
 		eprintln(err.msg())
 		exit(1)
 	}
 	mut foptions := FormatOptions{
-		is_c:             '-c' in args
-		is_l:             '-l' in args
-		is_w:             '-w' in args
-		is_diff:          '-diff' in args
-		is_verbose:       '-verbose' in args || '--verbose' in args
-		is_worker:        '-worker' in args
-		is_debug:         '-debug' in args
-		is_noerror:       '-noerror' in args
-		is_verify:        '-verify' in args
-		is_backup:        '-backup' in args
-		in_process:       '-inprocess' in args
-		is_new_int:       '-new_int' in args
-		no_migrate_json2: '-no-migrate-json2' in args
-		backend:          backend
+		is_c:                '-c' in args
+		is_l:                '-l' in args
+		is_w:                '-w' in args
+		is_diff:             '-diff' in args
+		is_verbose:          '-verbose' in args || '--verbose' in args
+		is_worker:           '-worker' in args
+		is_debug:            '-debug' in args
+		is_noerror:          '-noerror' in args
+		is_verify:           '-verify' in args
+		is_backup:           '-backup' in args
+		in_process:          '-inprocess' in args
+		is_new_int:          '-new_int' in args
+		no_migrate_json2:    '-no-migrate-json2' in args
+		module_search_paths: compiler_pref.expand_module_search_paths(cmdline.option(args,
+			'-path', ''), os.dir(os.getenv('VEXE')))
+		backend:             backend
 	}
 	if term_colors {
 		os.setenv('VCOLORS', 'always', true)
@@ -115,7 +121,7 @@ fn main() {
 		eprintln('vfmt possible_files: ' + possible_files.str())
 	}
 	if '-help' in args || '--help' in args {
-		help.print_and_exit('fmt')
+		print_vfmt_help_and_exit()
 	}
 	files := util.find_all_v_files(possible_files) or {
 		verror(err.msg())
@@ -126,12 +132,12 @@ fn main() {
 		exit(0)
 	}
 	if files.len == 0 {
-		help.print_and_exit('fmt')
+		print_vfmt_help_and_exit()
 	}
 	mut cli_args_no_files := []string{}
 	for idx, a in os.args {
 		if idx == 0 {
-			cli_args_no_files << os.quoted_path(a)
+			cli_args_no_files << a
 			continue
 		}
 		if a !in files {
@@ -153,10 +159,10 @@ fn main() {
 			continue
 		}
 		mut worker_command_array := cli_args_no_files.clone()
-		worker_command_array << ['-worker', util.quote_path(fpath)]
+		worker_command_array << ['-worker', fpath]
 		worker_cmd := worker_command_array.join(' ')
 		foptions.vlog('vfmt worker_cmd: ${worker_cmd}')
-		worker_result := os.execute(worker_cmd)
+		worker_result := os.exec(worker_command_array)
 		// Guard against a possibly crashing worker process.
 		if worker_result.exit_code != 0 {
 			eprintln(worker_result.output)
@@ -202,52 +208,10 @@ fn main() {
 	exit(0)
 }
 
-// verify_file accepts both V3 and legacy vfmt output while the existing source tree
-// transitions to V3 formatting.
 fn (foptions &FormatOptions) verify_file(fpath string) bool {
 	content := os.read_file(fpath) or { return false }
-	fcontent := foptions.formatted_content_from_file(fpath, false) or {
-		if foptions.is_legacy_formatted(fpath, content) {
-			return true
-		}
-		_ = foptions.formatted_content_from_file(fpath, true) or { return false }
-		return false
-	}
-	return fcontent == content || foptions.is_legacy_formatted(fpath, content)
-}
-
-fn (foptions &FormatOptions) is_legacy_formatted(fpath string, content string) bool {
-	args := util.join_env_vflags_and_os_args()
-	mut prefs, _ := pref.parse_args_and_show_errors(['fmt'], legacy_vfmt_args(args), false)
-	prefs.is_fmt = true
-	prefs.skip_warnings = true
-	prefs.output_mode = .silent
-	mut table := ast.new_table()
-	file_ast := parser.parse_file(fpath, mut table, .parse_comments, prefs)
-	if file_ast.errors.len > 0 {
-		return false
-	}
-	table.new_int = foptions.is_new_int
-	legacy_content := fmt.fmt(file_ast, mut table, prefs, foptions.is_debug,
-		migrate_json2: foptions.should_migrate_json2(fpath)
-	)
-	return legacy_content == content
-}
-
-fn legacy_vfmt_args(args []string) []string {
-	mut res := []string{}
-	for i := 1; i < args.len; i++ {
-		arg := args[i]
-		if arg == '-worker' {
-			i++
-			continue
-		}
-		if arg in legacy_vfmt_only_flags {
-			continue
-		}
-		res << arg
-	}
-	return res
+	fcontent := foptions.formatted_content_from_file(fpath, false) or { return false }
+	return fcontent == content
 }
 
 fn (foptions &FormatOptions) vlog(msg string) {
@@ -260,29 +224,109 @@ fn (foptions &FormatOptions) should_migrate_json2(file string) bool {
 	if foptions.no_migrate_json2 {
 		return false
 	}
-	return !file.ends_with('_test.v') && !file.ends_with('.vv')
+	// `.vv` files are fixtures (formatter and compiler test inputs) whose legacy
+	// source is the point; tests are migrated like any other code.
+	return !file.ends_with('.vv')
+}
+
+fn imports_json(a &flat.FlatAst) bool {
+	return a.nodes.any(it.kind == .import_decl && it.value == 'json')
+}
+
+// resolves_project_json_module reports whether `import json` in `file` resolves to
+// an existing module. vlib has no `json` module anymore, so such a module belongs
+// to the project (beside the file, in a parent directory, or in a module root).
+// The compiler keeps using it, so its calls must not be rewritten to `json2`.
+fn (foptions &FormatOptions) resolves_project_json_module(file string) bool {
+	mut lookup := &compiler_pref.Preferences{
+		vroot: os.dir(os.getenv('VEXE'))
+	}
+	if foptions.module_search_paths.len > 0 {
+		// `-path` replaces vlib and ~/.vmodules as the module roots, but the compiler
+		// still looks beside the importing file and in its parent directories first
+		// (`resolve_local_or_project_module_path` and `resolve_ancestor_module_path`
+		// in v.driver); `pref.get_module_path` is only its last fallback.
+		// Like `module_dir_belongs_to_other_project`, a parent directory's `json` only
+		// counts when it belongs to the importer's project, or declares `json` itself.
+		mut roots := foptions.module_search_paths.clone()
+		importer_vmod_root := util.nearest_vmod_root(file) or { '' }
+		for dir in importer_and_parent_dirs(file) {
+			if json_dir_belongs_to_importer(os.join_path(dir, 'json'), importer_vmod_root) {
+				roots << dir
+			}
+		}
+		lookup.module_search_paths = roots
+	}
+	return lookup.get_module_path('json', file) != ''
+}
+
+// json_dir_belongs_to_importer reports whether a `json` directory in a parent folder
+// is the module an import of the importer (in the project at `importer_vmod_root`)
+// resolves to: it is inside that project, or its own `v.mod` declares `json`.
+fn json_dir_belongs_to_importer(candidate string, importer_vmod_root string) bool {
+	if importer_vmod_root.len == 0 {
+		return true
+	}
+	real_candidate := os.real_path(candidate).replace('\\', '/')
+	real_importer := os.real_path(importer_vmod_root).replace('\\', '/')
+	if real_candidate == real_importer || real_candidate.starts_with(real_importer + '/') {
+		return true
+	}
+	root := util.nearest_vmod_root(candidate) or { return false }
+	manifest := vmod.from_file(os.join_path_single(root, 'v.mod')) or { return false }
+	return manifest.name == 'json'
+}
+
+// importer_and_parent_dirs lists the directory of `file` and its parents, up to a
+// directory with a module search stop marker.
+fn importer_and_parent_dirs(file string) []string {
+	mut dirs := []string{}
+	mut dir := os.dir(os.real_path(file))
+	for {
+		dirs << dir
+		if compiler_pref.is_module_search_stop_dir(dir) {
+			break
+		}
+		parent := os.dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return dirs
 }
 
 fn (foptions &FormatOptions) formatted_content_from_file(file string, report_diagnostics bool) !string {
-	foptions.vlog('vfmt running v3.gen.v over file: ${file}')
-	mut prefs := v3pref.new_preferences()
+	return foptions.formatted_content_with_imports_from(file, report_diagnostics, file)
+}
+
+// formatted_content_with_imports_from formats `file`, resolving its imports as if it
+// were `import_file`: stdin is staged in a temporary folder, but its imports belong
+// to the caller's working directory.
+fn (foptions &FormatOptions) formatted_content_with_imports_from(file string, report_diagnostics bool, import_file string) !string {
+	foptions.vlog('vfmt running v.gen.v over file: ${file}')
+	mut prefs := compiler_pref.new_preferences()
 	prefs.is_fmt = true
 	prefs.migrate_json2 = foptions.should_migrate_json2(file)
 	prefs.preserve_comptime_conditionals = true
 	prefs.supports_inline_asm = true
-	mut p := v3parser.Parser.new(prefs)
-	a := p.parse_file(file)
-	if report_v3_parser_diagnostics(p.diagnostics, a, report_diagnostics) {
+	mut p := compiler_parser.Parser.new(prefs)
+	mut a := p.parse_file(file)
+	if a.formatter_migrate_json2 && imports_json(a)
+		&& foptions.resolves_project_json_module(import_file) {
+		a.formatter_migrate_json2 = false
+	}
+	if report_compiler_parser_diagnostics(p.diagnostics, a, report_diagnostics) {
 		return error('the file contains parser errors')
 	}
-	return v3fmt.format_with_options(a,
+	return compiler_fmt.format_with_options(a,
 		is_debug:   foptions.is_debug
 		is_new_int: foptions.is_new_int
 		backend:    foptions.backend
 	)
 }
 
-fn report_v3_parser_diagnostics(diagnostics []v3parser.Diagnostic, a &flat.FlatAst, should_report bool) bool {
+fn report_compiler_parser_diagnostics(diagnostics []compiler_parser.Diagnostic, a &flat.FlatAst, should_report bool) bool {
 	mut has_errors := false
 	for diagnostic in diagnostics {
 		severity := if diagnostic.severity == '' { 'error:' } else { diagnostic.severity }
@@ -294,8 +338,7 @@ fn report_v3_parser_diagnostics(diagnostics []v3parser.Diagnostic, a &flat.FlatA
 			continue
 		}
 		if diagnostic.pos.is_valid() && diagnostic.pos.id in a.source_files {
-			eprintln(v3errors.formatted_parser_diagnostic(severity, diagnostic.message, a,
-				diagnostic.pos))
+			eprintln(compiler_errors.formatted_parser_diagnostic(severity, diagnostic.message, a, diagnostic.pos))
 		} else {
 			eprintln('${diagnostic.file}:${diagnostic.line}:${diagnostic.column}: ${severity} ${diagnostic.message}')
 		}
@@ -316,12 +359,6 @@ fn (foptions &FormatOptions) format_file(file string) {
 	formatted_content := foptions.formatted_content_from_file(file, !foptions.is_verify
 		&& !foptions.is_c) or {
 		if foptions.is_verify || foptions.is_c {
-			content := os.read_file(file) or { exit(2) }
-			if foptions.is_legacy_formatted(file, content) {
-				os.cp(file, vfmt_output_path) or { exit(2) }
-				eprintln('${formatted_file_token}${vfmt_output_path}')
-				return
-			}
 			_ = foptions.formatted_content_from_file(file, true) or { exit(2) }
 		}
 		exit(2)
@@ -341,7 +378,8 @@ fn (foptions &FormatOptions) format_pipe() {
 	defer {
 		os.rm(stdin_path) or {}
 	}
-	formatted_content := foptions.formatted_content_from_file(stdin_path, true) or { exit(1) }
+	formatted_content := foptions.formatted_content_with_imports_from(stdin_path, true,
+		os.join_path(os.getwd(), 'vfmt_stdin.v')) or { exit(1) }
 	print(formatted_content)
 	flush_stdout()
 	foptions.vlog('vfmt wrote ${formatted_content.len} bytes to stdout.')
@@ -368,14 +406,14 @@ fn (mut foptions FormatOptions) post_process_file(file string, formatted_file_pa
 		return error('')
 	}
 	if foptions.is_verify {
-		if !is_formatted_different || foptions.is_legacy_formatted(file, fc) {
+		if !is_formatted_different {
 			return
 		}
 		println("${file} is not vfmt'ed")
 		return error('')
 	}
 	if foptions.is_c {
-		if is_formatted_different && !foptions.is_legacy_formatted(file, fc) {
+		if is_formatted_different {
 			eprintln('File is not formatted: ${file}')
 			return error('')
 		}
@@ -413,13 +451,17 @@ fn (mut foptions FormatOptions) post_process_file(file string, formatted_file_pa
 }
 
 @[noreturn]
+fn print_vfmt_help_and_exit() {
+	println('Usage: v fmt [options] <file|directory>...')
+	println('Options: -w, -verify, -diff, -l, -c, -backup, -inprocess')
+	exit(0)
+}
+
+@[noreturn]
 fn verror(s string) {
 	util.verror('vfmt error', s)
 }
 
 fn (f FormatOptions) str() string {
-	return
-		'FormatOptions{ is_l: ${f.is_l}, is_w: ${f.is_w}, is_diff: ${f.is_diff}, is_verbose: ${f.is_verbose},' +
-		' is_worker: ${f.is_worker}, is_debug: ${f.is_debug}, is_noerror: ${f.is_noerror},' +
-		' is_verify: ${f.is_verify}, backend: ${f.backend}" }'
+	return 'FormatOptions{ is_l: ${f.is_l}, is_w: ${f.is_w}, is_diff: ${f.is_diff}, is_verbose: ${f.is_verbose},' + ' is_worker: ${f.is_worker}, is_debug: ${f.is_debug}, is_noerror: ${f.is_noerror},' + ' is_verify: ${f.is_verify}, backend: ${f.backend}" }'
 }

@@ -5,7 +5,6 @@ on:
     branches:
       - master
     paths-ignore:
-      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '**.vv'
@@ -15,7 +14,6 @@ on:
       - 'cmd/tools/vrepl.v'
   pull_request:
     paths-ignore:
-      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '**.vv'
@@ -27,6 +25,9 @@ on:
 concurrency:
   group: vup-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   v-up-works-nix:
@@ -46,6 +47,8 @@ jobs:
       VDIR: /tmp/v_from_release_zip
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Build v
         run: make && ./v symlink && ./v version
 

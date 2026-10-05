@@ -52,12 +52,30 @@ unsigned char func_name(int * p, index int);
 fn C.func_name(p &int, index i32) u8
 ```
 
+For a C output parameter, pass the address of the variable or struct field that C should update.
+A cast such as `voidptr(&handle)` preserves that address when passed to a C `void **`
+parameter declared as `&voidptr` in V. Writes by C update the original caller storage,
+including fields in heap allocated structs.
+
 
 ## Representing compound types in C and V:
 A V struct is the same as a C struct, with the same field names and
 types, but the order of declaring field names and their types in C structs
 and V structs is different - in C you use: `short field_name;`, but in V,
 that would be: `field_name i16`.
+
+V does not scan C headers to discover declarations. Redeclare the fields you use
+in a `.c.v` file, and mark a C typedef with `@[typedef]`. For example,
+`typedef struct { int x; } Foo;` needs this V binding:
+
+```v ignore
+@[typedef]
+struct C.Foo {
+	x int
+}
+```
+
+The attribute is required with both `#include` and `#insert`.
 
 ## Passing V strings to C functions:
 The V string type, is currently defined like this:
@@ -96,6 +114,10 @@ If you want to pass a pointer to the elements of a V array `a`, to a C function,
 use `a.data`. NOTE: do *not* use `&a` for that purpose. That will result in the address
 of the `array` itself, getting passed to the C function, and *not* the address of the
 elements of the V array.
+
+Passing `a.data` to a V pointer parameter also passes the element buffer directly.
+Parenthesizing the argument, such as `(a.data)`, preserves that behavior.
+This holds when `a` is a pointer to an array or a mutable array parameter.
 
 
 ## Passing V fixed array elements to C functions:

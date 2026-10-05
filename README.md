@@ -77,6 +77,9 @@ functional `git` installation.
 
 Note: On Windows, run `makev.bat` instead of `make` in CMD, or `./makev.bat` in
 PowerShell.
+To build with Visual Studio, run `makev.bat -msvc`. If the bundled TCC bootstrap cannot be
+compiled or fails while building the next compiler stage, the script retries with MSVC,
+then Clang and GCC.
 Note: On FreeBSD, OpenBSD, NetBSD, DragonFly, and Solaris, install GNU `make` and run it as
 `gmake`.
 Note: On Ubuntu/Debian, you may need to run `sudo apt install git build-essential make` first.
@@ -90,6 +93,12 @@ make
 
 That should be it, and you should find your V executable at `[path to V repo]/v`.
 `[path to V repo]` can be anywhere.
+
+On macOS, `make` guards Linux-only `prctl` code in older bootstrap snapshots before
+streaming `vc/v.c` to the C compiler. The single snapshot stays unchanged on disk.
+
+On Windows, `makev.bat` generates the first compiler stage as C and links it directly.
+This also works with older bootstrap snapshots whose process-spawn code is broken.
 
 (Like the note above says, on Windows, use `makev.bat`, instead of `make`.)
 
@@ -147,8 +156,8 @@ alias with_alpine='docker run -u 1000:1000 --rm -it -v .:/src -w /src vlang_alpi
 Compiling *static* executables, ready to be copied to a server, that is running
 another linux distro, without dependencies:
 ```bash
-with_alpine v -skip-unused -prod -cc gcc -cflags -static -compress examples/http_server.v
-with_alpine v -skip-unused -prod -cc gcc -cflags -static -compress -gc none examples/hello_world.v
+with_alpine v -prod -cc gcc -cflags -static -compress examples/http_server.v
+with_alpine v -prod -cc gcc -cflags -static -compress -gc none examples/hello_world.v
 ls -la examples/http_server examples/hello_world
 file   examples/http_server examples/hello_world
 examples/http_server: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, no section header
@@ -207,6 +216,17 @@ when no compatible bundled `thirdparty/tcc` binary is available on the host.
 
 The [Tiny C Compiler (tcc)](https://repo.or.cz/w/tinycc.git) is downloaded for you by `make` if
 there is a compatible version for your system, and installed under the V `thirdparty` directory.
+
+For regular non-production builds on supported hosts, V prefers a working bundled TCC, then a
+working `tcc` from `PATH`, before using the platform compiler. The system fallback is selected only
+when required V runtime artifacts are available, including the bundled `libgc.a` used by default
+glibc and Windows Boehm builds.
+
+`-prod` builds never default to TCC, which cannot do their optimizations. On x64 Windows,
+without `-cc`, a `-prod` build uses MSVC when an x64 Visual Studio Developer environment is
+active (`cl` on `PATH`, with `INCLUDE` and `LIB` set; not for `-o file.o`), otherwise a `clang`
+that targets x86_64 MinGW, otherwise `gcc`. A native `-prod` build on another Windows
+architecture uses `gcc`. An explicit `-cc` always wins.
 
 On macOS, `-cc tcc -gc boehm` uses a persistent bundled `libgc.dylib` store when the physical V
 installation path contains a comma. The store is under `$XDG_DATA_HOME/v-tcc-libgc-v1`, or
@@ -301,6 +321,8 @@ hello world
 ```
 
 `v self` defaults to `-gc none`. Pass `-gc <mode>` if you need a different GC mode.
+`v -prod self` uses a single production build of one C unit instead of the three-pass
+PGO cycle.
 
 ```bash
 cd examples

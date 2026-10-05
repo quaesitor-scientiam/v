@@ -635,7 +635,9 @@ fn (mut t Transport) round_trip(req &Request, method Method, scheme string, host
 		// fast-fail signal).
 		return t.h3_round_trip(req, key, method, host, port, path, data, header)
 	}
-	raw := req.build_request_headers_opts(method, host, port, path, data, header, false)
+	default_port := if scheme == 'https' { 443 } else { 80 }
+	raw := req.build_request_headers_opts(method, host, port, default_port, path, data, header,
+		false)!
 	$if trace_http_request ? {
 		eprint('> ')
 		eprint(raw)
@@ -713,6 +715,10 @@ fn (mut t Transport) tls_fresh_round_trip(req &Request, key string, raw string, 
 	$if windows && !no_vschannel ? {
 		return t.vschannel_fresh_round_trip(req, key, raw, method, host, port, path, data, header)
 	}
+	return t.tls_fresh_round_trip_ssl(req, key, raw, method, host, port, path, data, header)
+}
+
+fn (mut t Transport) tls_fresh_round_trip_ssl(req &Request, key string, raw string, method Method, host string, port int, path string, data string, header Header) !Response {
 	alpn := if req.enable_http2 { ['h2', 'http/1.1'] } else { []string{} }
 	mut ssl_conn := ssl.new_ssl_conn(
 		verify:                 req.verify

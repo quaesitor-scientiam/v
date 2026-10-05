@@ -30,7 +30,10 @@ fn C.AddVectoredExceptionHandler(u32, voidptr) voidptr
 
 fn C._getpid() i32
 
-const executable_suffixes = ['.exe', '.bat', '.cmd', '']
+// executable_suffixes are the extensions tried for a command name without one,
+// in the order of the default `PATHEXT` (`.COM;.EXE;.BAT;.CMD`), which is what
+// cmd.exe uses when two programs differ only by extension.
+const executable_suffixes = ['.com', '.exe', '.bat', '.cmd', '']
 
 // these consts are declared for parity with the nix version, their values are not used, except for -cross
 const s_ifmt = 0xF000 // type of file
@@ -270,9 +273,14 @@ fn native_glob_pattern(pattern string, mut matches []string) ! {
 		C.FindClose(h_find_files)
 	}
 
-	if h_find_files == C.INVALID_HANDLE_VALUE {
-		return error('os.glob(): Could not get a file handle: ' +
-			get_error_msg(int(C.GetLastError())))
+	if h_find_files == invalid_handle_value {
+		// GetLastError has to be read before anything else, including building
+		// this message. Concatenating allocates, and an allocation is enough to
+		// reset the thread's last-error value, so the code reported could be 0 --
+		// "The operation completed successfully" for a call that just failed.
+		// windows_execute_command_line below already reads it into error_num first.
+		error_num := int(C.GetLastError())
+		return error('os.glob(): Could not get a file handle: ' + get_error_msg(error_num))
 	}
 
 	// save first finding
@@ -339,6 +347,7 @@ pub fn utime(path string, actime i64, modtime i64) ! {
 	}
 }
 
+// ls returns the names of the files and directories in path.
 pub fn ls(path string) ![]string {
 	if path == '' {
 		return error('ls() expects a folder, not an empty string')
@@ -352,7 +361,10 @@ pub fn ls(path string) ![]string {
 	// }
 	// C.FindClose(h_find_dir)
 	if !is_dir(path) {
-		return error('ls() couldnt open dir "${path}": directory does not exist')
+		// match POSIX, where opendir() on an existing file fails with ENOTDIR
+		code := if exists(path) { error_code_notdir } else { error_code_noent }
+		return error_with_code('ls() couldnt open dir "${path}": directory does not exist',
+			code)
 	}
 	// we need to add files to path eg. c:\windows\*.dll or :\windows\*
 	path_files := '${path}\\*'
@@ -360,8 +372,10 @@ pub fn ls(path string) ![]string {
 	// we should use FindFirstFileW and FindNextFileW
 	h_find_files := C.FindFirstFile(path_files.to_wide(), voidptr(&find_file_data))
 	// Handle cases where files cannot be opened. for example:"System Volume Information"
-	if h_find_files == C.INVALID_HANDLE_VALUE {
-		return error('ls(): Could not get a file handle: ' + get_error_msg(int(C.GetLastError())))
+	if h_find_files == invalid_handle_value {
+		error_num := int(C.GetLastError())
+		return error_with_code('ls(): Could not get a file handle: ' + get_error_msg(error_num),
+			error_num)
 	}
 	first_filename := wide_ptr_to_string(&find_file_data.c_file_name[0])
 	if first_filename != '.' && first_filename != '..' {
@@ -384,8 +398,11 @@ pub fn mkdir(path string, params MkdirParams) ! {
 	}
 	apath := real_path(path)
 	if !C.CreateDirectory(apath.to_wide(), 0) {
-		return error('mkdir failed for "${apath}", because CreateDirectory returned: ' +
-			get_error_msg(int(C.GetLastError())))
+		// Read the code before the concatenation below allocates, or the message
+		// can name an error that never happened. See native_glob_pattern.
+		error_num := int(C.GetLastError())
+		return error_with_code('mkdir failed for "${apath}", because CreateDirectory returned: ' +
+			get_error_msg(error_num), error_num)
 	}
 }
 
@@ -466,14 +483,19 @@ pub fn get_error_msg(code int) string {
 // execute starts the specified command, waits for it to complete, and returns its output.
 // In opposition to `raw_execute` this function rejects `&&`, `||`, and linefeeds when they appear
 // outside double-quoted strings before delegating to `cmd.exe`.
+@[deprecated: 'use os.exec with an argument array; command strings can allow shell injection']
 pub fn execute(cmd string) Result {
+	return execute_shell(cmd)
+}
+
+fn execute_shell(cmd string) Result {
 	if windows_execute_has_forbidden_shell_operator(cmd) {
 		return Result{
 			exit_code: -1
 			output:    '&&, || and \\n are not allowed in shell commands'
 		}
 	}
-	return unsafe { raw_execute(cmd) }
+	return unsafe { raw_execute_shell(cmd) }
 }
 
 // exec starts the specified command with arguments, waits for it to complete, and returns its output.
@@ -525,8 +547,14 @@ fn windows_execute_has_forbidden_shell_operator(cmd string) bool {
 // raw_execute starts the specified command, waits for it to complete, and returns its output.
 // It's marked as `unsafe` to help emphasize the problems that may arise by allowing, for example,
 // user provided escape sequences.
+@[deprecated: 'use os.exec with an argument array; command strings can allow shell injection']
 @[unsafe]
 pub fn raw_execute(cmd string) Result {
+	return unsafe { raw_execute_shell(cmd) }
+}
+
+@[unsafe]
+fn raw_execute_shell(cmd string) Result {
 	mut pcmd := cmd
 	if cmd.contains('./') {
 		pcmd = pcmd.replace('./', '.\\')
@@ -657,7 +685,7 @@ pub fn readlink(path string) !string {
 }
 
 pub fn link(origin string, target string) ! {
-	res := C.CreateHardLinkW(target.to_wide(), origin.to_wide(), C.NULL)
+	res := C.CreateHardLinkW(target.to_wide(), origin.to_wide(), unsafe { nil })
 	// 1 = success, != 1 failure => https://stackoverflow.com/questions/33010440/createsymboliclink-on-windows-10
 	if res != 1 {
 		return error(get_error_msg(int(C.GetLastError())))
@@ -722,14 +750,18 @@ pub fn uname() Uname {
 	// ToDO: environment variables have low reliability; check for another quick way
 	machine :=
 		getenv('PROCESSOR_ARCHITECTURE') // * note: 'AMD64' == 'x86_64' (not standardized, but 'x86_64' use is more common; but, python == 'AMD64')
-	version_info := execute('cmd /d/c ver').output
-	version_n := (version_info.split(' '))[3].replace(']', '').trim_space()
+	version_info := exec(['cmd', '/d', '/c', 'ver'])
+	release, version := if version_info.exit_code == 0 {
+		windows_version_parts(version_info.output)
+	} else {
+		'', ''
+	}
 	return Uname{
 		sysname:  'Windows_NT' // as of 2022-12, WinOS has only two possible kernels ~ 'Windows_NT' or 'Windows_9x'
 		nodename: nodename
 		machine:  machine.trim_space()
-		release:  (version_n.split('.'))[0..2].join('.').trim_space() // Major.minor-only == "primary"/release version
-		version:  (version_n.split('.'))[2].trim_space()
+		release:  release // Major.minor-only == "primary"/release version
+		version:  version
 	}
 }
 

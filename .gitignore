@@ -28,6 +28,7 @@ a.out
 /v.c
 /v.*.c
 /v.c.out
+/v1_fallback
 /v_old
 /vdbg
 /vold
@@ -173,3 +174,6 @@ issue*
 .copilot/
 .agents/
 .codex/
+
+# the C build folder a self compile leaves behind (driver.v names it .<binary>.v3cc.<token>)
+.*.v3cc.*

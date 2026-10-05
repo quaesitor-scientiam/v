@@ -5,7 +5,6 @@ on:
     branches:
       - master
     paths-ignore:
-      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/vsl_and_vtl_compile_ci.yml'
@@ -13,7 +12,6 @@ on:
       - 'cmd/tools/vrepl.v'
   pull_request:
     paths-ignore:
-      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/vsl_and_vtl_compile_ci.yml'
@@ -23,6 +21,9 @@ on:
 concurrency:
   group: vsl-vtl-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   vsl-compiles:
@@ -36,6 +37,8 @@ jobs:
       VFLAGS: -no-parallel
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Cache apt packages
         if: runner.os == 'Linux'
         uses: ./.github/actions/cache-apt-packages-action
@@ -92,6 +95,8 @@ jobs:
       TERM: xterm
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Cache apt packages
         if: runner.os == 'Linux'
         uses: ./.github/actions/cache-apt-packages-action

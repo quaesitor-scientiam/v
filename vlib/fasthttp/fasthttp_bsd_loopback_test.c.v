@@ -3,6 +3,9 @@ module fasthttp
 
 import net.http
 import time
+import net
+
+fn C.shutdown(fd i32, how i32) i32
 
 const loopback_request_port = 13020
 const loopback_request_addr = '127.0.0.1:${loopback_request_port}'
@@ -40,6 +43,38 @@ fn test_handler_can_make_loopback_request_to_same_server() {
 	}
 	assert resp.status_code == 200
 	assert resp.body == 'outer:inner'
+
+	mut conn := net.dial_tcp(loopback_request_addr) or {
+		assert false, 'pipelining connection failed: ${err}'
+		return
+	}
+	defer {
+		conn.close() or {}
+	}
+	conn.set_read_timeout(2 * time.second)
+	conn.set_write_timeout(2 * time.second)
+	conn.write_string('GET /one HTTP/1.1\r\nHost: ${loopback_request_addr}\r\n\r\n' + 'GET /two HTTP/1.1\r\nHost: ${loopback_request_addr}\r\nConnection: close\r\n\r\n') or {
+		assert false, 'pipelined write failed: ${err}'
+		return
+	}
+	assert C.shutdown(conn.sock.handle, C.SHUT_WR) == 0
+	mut pipelined := []u8{}
+	mut chunk := []u8{len: 1024}
+	for pipelined.bytestr().count('HTTP/1.1 200 OK') < 2 {
+		n := conn.read(mut chunk) or {
+			assert false, 'pipelined read failed: ${err}'
+			return
+		}
+		if n == 0 {
+			break
+		}
+		pipelined << chunk[..n]
+	}
+	pipelined_response := pipelined.bytestr()
+	assert pipelined_response.count('HTTP/1.1 200 OK') == 2, pipelined_response
+	one_pos := pipelined_response.index('one') or { -1 }
+	two_pos := pipelined_response.index('two') or { -1 }
+	assert one_pos >= 0 && two_pos > one_pos
 }
 
 fn loopback_request_handler(req HttpRequest) !HttpResponse {
@@ -60,6 +95,13 @@ fn loopback_request_handler(req HttpRequest) !HttpResponse {
 		body := 'outer:${inner.body}'
 		return HttpResponse{
 			content: 'HTTP/1.1 200 OK\r\nContent-Length: ${body.len}\r\n\r\n${body}'.bytes()
+		}
+	}
+	if path == '/one' || path == '/two' {
+		body := path[1..]
+		return HttpResponse{
+			content:      'HTTP/1.1 200 OK\r\nContent-Length: ${body.len}\r\n\r\n${body}'.bytes()
+			should_close: path == '/two'
 		}
 	}
 	return HttpResponse{

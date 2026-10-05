@@ -7,6 +7,7 @@ import io
 import net
 import time
 import runtime
+
 // ServerStatus is the current status of the server.
 // .closed means that the server is completely inactive (the default on creation, and after calling .close()).
 // .running means that the server is active and serving (after .listen_and_serve()).
@@ -227,7 +228,12 @@ fn (mut w HandlerWorker) handle_conn(mut conn net.TcpConn) {
 		}
 	}
 
-	if w.enable_http2 && try_serve_h2c(mut reader, mut conn, mut w.handler) {
+	// The peer of a keep-alive connection never changes, so read it once here
+	// rather than per request. '0.0.0.0' preserves the fallback this server has
+	// always used when the address cannot be read back from the socket.
+	remote_addr := if paddr := conn.peer_addr() { paddr.str() } else { '0.0.0.0' }
+
+	if w.enable_http2 && try_serve_h2c(mut reader, mut conn, mut w.handler, remote_addr) {
 		return
 	}
 
@@ -244,8 +250,7 @@ fn (mut w HandlerWorker) handle_conn(mut conn net.TcpConn) {
 		}
 		request_count++
 
-		remote_ip := conn.peer_ip() or { '0.0.0.0' }
-		req.header.add_custom('Remote-Addr', remote_ip) or {}
+		req.set_remote_addr(remote_addr)
 
 		mut resp := w.handler.handle(req)
 		normalize_server_response(mut resp, req)
@@ -308,11 +313,11 @@ fn normalize_server_response(mut resp Response, req Request) {
 	}
 
 	status := status_from_int(resp.status_code)
-	if status.is_valid() {
+	if resp.status_code >= 100 && resp.status_code <= 599 {
 		if resp.status_msg == '' {
 			resp.status_msg = status.str()
 		}
-	} else if resp.status_code == 0 && resp.status_msg == '' {
+	} else if resp.status_code == 0 {
 		resp.set_status(.ok)
 	} else {
 		resp.set_status(.internal_server_error)

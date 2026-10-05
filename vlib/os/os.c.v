@@ -90,6 +90,7 @@ pub fn read_bytes(path string) ![]u8 {
 	if nr_read_elements == 0 && fsize > 0 {
 		return error('fread failed')
 	}
+	race_file_read()
 	res.trim(nr_read_elements)
 	return res
 }
@@ -115,6 +116,12 @@ fn find_cfile_size(fp &C.FILE) !int {
 		// Rewind before returning so the caller can read from the beginning.
 		C.rewind(fp)
 		return 0
+	}
+	// Directories and other non-regular files can make ftell() return LONG_MAX with glibc.
+	// With 64-bit `int` (v3), the old truncation guard below no longer rejects that,
+	// and `read_file` would try to allocate `LONG_MAX + 1` bytes, which overflows.
+	if raw_fsize > i64(max_int) - 1 {
+		return error('file size ${raw_fsize} is too large to be read into memory')
 	}
 	len := int(raw_fsize)
 	// For files > 2GB, C.ftell can return values that, when cast to `int`, can result in values below 0.
@@ -172,6 +179,7 @@ pub fn read_file(path string) !string {
 			free(str)
 			return error('fread failed')
 		}
+		race_file_read()
 		str[nelements] = 0
 		if nelements == 0 {
 			// It is highly likely that the file was a virtual file from
@@ -232,12 +240,12 @@ pub fn rename_dir(src string, dst string) ! {
 		w_dst := dst.replace('/', '\\')
 		ret := C._wrename(w_src.to_wide(), w_dst.to_wide())
 		if ret != 0 {
-			return error_with_code('failed to rename ${src} to ${dst}', int(ret))
+			return error_posix(msg: 'failed to rename ${src} to ${dst}')
 		}
 	} $else {
 		ret := C.rename(&char(src.str), &char(dst.str))
 		if ret != 0 {
-			return error_with_code('failed to rename ${src} to ${dst}', ret)
+			return error_posix(msg: 'failed to rename ${src} to ${dst}')
 		}
 	}
 }
@@ -255,12 +263,12 @@ pub fn rename(src string, dst string) ! {
 		w_dst := rdst.replace('/', '\\')
 		ret := C._wrename(w_src.to_wide(), w_dst.to_wide())
 		if ret != 0 {
-			return error_with_code('failed to rename ${src} to ${dst}', int(ret))
+			return error_posix(msg: 'failed to rename ${src} to ${dst}')
 		}
 	} $else {
 		ret := C.rename(&char(src.str), &char(rdst.str))
 		if ret != 0 {
-			return error_with_code('failed to rename ${src} to ${dst}', ret)
+			return error_posix(msg: 'failed to rename ${src} to ${dst}')
 		}
 	}
 }
@@ -431,6 +439,7 @@ fn vpclose(f voidptr) int {
 }
 
 // system works like `exec`, but only returns a return code.
+@[deprecated: 'use os.system_args with an argument array; command strings can allow shell injection']
 pub fn system(cmd string) int {
 	// if cmd.contains(';') || cmd.contains('&&') || cmd.contains('||') || cmd.contains('\n') {
 	// TODO: remove panic
@@ -508,19 +517,30 @@ pub fn is_executable(path string) bool {
 		// 02 Write-only
 		// 04 Read-only
 		// 06 Read and write
-		p := real_path(path)
-		if !exists(p) {
-			return false
+		// Windows decides by extension, so check that first: a name that already
+		// carries an executable extension needs a single existence check, without
+		// opening the file to resolve links (`real_path`), which costs several
+		// times more and runs for every hit in `find_abs_path_of_executable`.
+		// A name without one may still be a link to an executable, so resolve it.
+		if win_has_executable_extension(path) {
+			return exists(path)
 		}
-		ext := p.to_lower().all_after_last('.')
-		// Note: Extensions like 'ps1', 'vbs', 'js', 'msi', 'scr', 'pif' require specific interpreters and are not directly executable
-		return ext in ['exe', 'com', 'bat', 'cmd']
+		p := real_path(path)
+		return exists(p) && win_has_executable_extension(p)
 	}
 	$if solaris {
 		attr := stat(path) or { return false }
 		return (int(attr.mode) & (s_ixusr | s_ixgrp | s_ixoth)) != 0
 	}
 	return C.access(&char(path.str), x_ok) != -1
+}
+
+// win_has_executable_extension reports whether `path` ends in one of the
+// extensions Windows runs directly.
+// Note: Extensions like 'ps1', 'vbs', 'js', 'msi', 'scr', 'pif' require specific interpreters and are not directly executable
+fn win_has_executable_extension(path string) bool {
+	ext := path.to_lower().all_after_last('.')
+	return ext in ['exe', 'com', 'bat', 'cmd']
 }
 
 // is_writable returns `true` if `path` is writable.
@@ -606,13 +626,13 @@ pub fn get_raw_line() string {
 		is_console := is_atty(0) > 0
 		wide_char_size := if is_console { 2 } else { 1 }
 		h_input := C.GetStdHandle(C.STD_INPUT_HANDLE)
-		if h_input == C.INVALID_HANDLE_VALUE {
+		if h_input == invalid_handle_value {
 			return ''
 		}
 		unsafe {
 			initial_size := 256 * wide_char_size
 			mut buf := malloc_noscan(initial_size)
-			defer { unsafe { buf.free() } }
+			defer { buf.free() }
 			mut capacity := initial_size
 			mut offset := 0
 
@@ -680,6 +700,7 @@ pub fn get_raw_line() string {
 		} else if int(C.feof(C.stdin)) == 0 && int(C.ferror(C.stdin)) != 0 {
 			panic('get_raw_line(): error reading from stdin')
 		}
+		race_file_read()
 		ret := str.clone()
 		$if !autofree {
 			unsafe {
@@ -724,6 +745,12 @@ pub fn get_raw_stdin() []u8 {
 		max := usize(0)
 		buf := &u8(unsafe { nil })
 		nr_chars := unsafe { C.getline(voidptr(&buf), &max, C.stdin) }
+		$if race ? {
+			// A read that failed does not happen after the writes to stdin.
+			if nr_chars >= 0 || C.ferror(C.stdin) == 0 {
+				race_file_read()
+			}
+		}
 		return array{
 			element_size: 1
 			data:         voidptr(buf)
@@ -735,8 +762,7 @@ pub fn get_raw_stdin() []u8 {
 
 // read_file_array reads an array of `T` values from file `path`.
 pub fn read_file_array[T](path string) []T {
-	a := T{}
-	tsize := int(sizeof(a))
+	tsize := int(sizeof(T))
 	// prepare for reading, get current file size
 	mut fp := vfopen(path, 'rb') or { return []T{} }
 	C.fseek(fp, 0, C.SEEK_END)
@@ -754,6 +780,12 @@ pub fn read_file_array[T](path string) []T {
 		malloc_noscan(allocate)
 	}
 	nread := C.fread(buf, tsize, len, fp)
+	$if race ? {
+		// A read that failed does not happen after the writes to the file.
+		if nread > 0 || C.ferror(fp) == 0 {
+			race_file_read()
+		}
+	}
 	C.fclose(fp)
 	return unsafe {
 		array{
@@ -803,7 +835,7 @@ pub fn executable() string {
 	}
 	$if macos {
 		self_path := &char(C._dyld_get_image_name(u32(0)))
-		if self_path == C.NULL {
+		if self_path == unsafe { nil } {
 			return executable_fallback()
 		}
 		return unsafe { cstring_to_vstring(self_path) }
@@ -826,14 +858,14 @@ pub fn executable() string {
 		bufsize := usize(max_path_buffer_size)
 		pid := C.getpid()
 		mib := [i32(C.CTL_KERN), C.KERN_PROC_ARGS, pid, C.KERN_PROC_ARGV]! // C `int` mib buffer
-		if unsafe { C.sysctl(&mib[0], mib.len, C.NULL, &bufsize, C.NULL, 0) } == 0 {
+		if unsafe { C.sysctl(&mib[0], mib.len, nil, &bufsize, nil, 0) } == 0 {
 			if bufsize > max_path_buffer_size {
 				pbuf = unsafe { &&u8(malloc(int(bufsize))) }
 				defer(fn) {
 					unsafe { free(pbuf) }
 				}
 			}
-			if unsafe { C.sysctl(&mib[0], mib.len, pbuf, &bufsize, C.NULL, 0) } == 0 {
+			if unsafe { C.sysctl(&mib[0], mib.len, pbuf, &bufsize, nil, 0) } == 0 {
 				if unsafe { *pbuf[0] } == `/` {
 					res := unsafe { tos_clone(pbuf[0]) }
 					return res
@@ -1177,7 +1209,7 @@ pub fn is_atty(fd int) int {
 				C.STD_OUTPUT_HANDLE
 			}
 			handle := C.GetStdHandle(handle_id)
-			if isnil(handle) || handle == C.INVALID_HANDLE_VALUE {
+			if isnil(handle) || handle == invalid_handle_value {
 				return 0
 			}
 			if !C.GetConsoleMode(handle, voidptr(&mode)) {

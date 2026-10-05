@@ -465,16 +465,18 @@ pub fn (mut h Header) set(key CommonHeader, value string) {
 pub fn (mut h Header) set_custom(key string, value string) ! {
 	is_valid(key)!
 	mut set := false
-	for i, kv in h.data {
-		if kv.key == key {
+	mut i := 0
+	for i < h.cur_pos {
+		if header_key_eq(h.data[i].key, key) {
 			if !set {
 				h.data[i] = HeaderKV{key, value}
 				set = true
+				i++
 			} else {
-				// Remove old duplicates
-				h.data[i] = HeaderKV{key, ''}
+				h.delete_at(i)
 			}
-			// return
+		} else {
+			i++
 		}
 	}
 	if set {
@@ -492,11 +494,39 @@ pub fn (mut h Header) delete(key CommonHeader) {
 	h.delete_custom(key.str())
 }
 
+// remove_custom_all removes every header whose key matches `key`
+// case-insensitively, compacting the entries that follow so no empty
+// placeholder is left behind for a later lookup to find.
+//
+// This is deliberately stricter than `delete_custom`, which only matches the
+// exact casing and overwrites matches with an empty value in place -- a
+// tombstone that `get_custom` still returns, as an empty string, ahead of any
+// value added afterwards.
+fn (mut h Header) remove_custom_all(key string) {
+	mut kept := 0
+	for i := 0; i < h.cur_pos; i++ {
+		if header_key_eq(h.data[i].key, key) {
+			continue
+		}
+		if kept != i {
+			h.data[kept] = h.data[i]
+		}
+		kept++
+	}
+	for i := kept; i < h.cur_pos; i++ {
+		h.data[i] = HeaderKV{}
+	}
+	h.cur_pos = kept
+}
+
 // delete_custom deletes all values for a custom header key.
 pub fn (mut h Header) delete_custom(key string) {
-	for i := 0; i < h.cur_pos; i++ {
-		if h.data[i].key == key {
-			h.data[i] = HeaderKV{key, ''}
+	mut i := 0
+	for i < h.cur_pos {
+		if header_key_eq(h.data[i].key, key) {
+			h.delete_at(i)
+		} else {
+			i++
 		}
 	}
 	// h.data.delete(key)
@@ -508,6 +538,14 @@ pub fn (mut h Header) delete_custom(key string) {
 		h.keys[kl] = h.keys[kl].filter(it != key)
 	}
 	*/
+}
+
+fn (mut h Header) delete_at(index int) {
+	for i := index; i < h.cur_pos - 1; i++ {
+		h.data[i] = h.data[i + 1]
+	}
+	h.cur_pos--
+	h.data[h.cur_pos] = HeaderKV{}
 }
 
 // contains returns whether the header key exists in the map.
@@ -607,7 +645,7 @@ pub fn (h Header) custom_values(key string, flags HeaderQueryConfig) []string {
 	if flags.exact {
 		for i := 0; i < h.cur_pos; i++ {
 			kv := h.data[i]
-			if kv.key == key && kv.value != '' { // empty value means a deleted header
+			if kv.key == key {
 				res << kv.value
 			}
 		}
@@ -615,7 +653,7 @@ pub fn (h Header) custom_values(key string, flags HeaderQueryConfig) []string {
 	} else {
 		for i := 0; i < h.cur_pos; i++ {
 			kv := h.data[i]
-			if header_key_eq(kv.key, key) && kv.value != '' { // empty value means a deleted header
+			if header_key_eq(kv.key, key) {
 				res << kv.value
 			}
 		}
@@ -627,13 +665,25 @@ pub fn (h Header) custom_values(key string, flags HeaderQueryConfig) []string {
 pub fn (h Header) keys() []string {
 	mut res := []string{cap: h.cur_pos}
 	for i := 0; i < h.cur_pos; i++ {
-		if h.data[i].value == '' {
-			continue
-		}
 		res << h.data[i].key
 	}
-	// Make sure keys are lower case and unique
 	return arrays.uniq(res)
+}
+
+// unique_keys gets header names deduplicated case-insensitively, retaining the
+// first spelling. Use this when serializing HTTP fields.
+pub fn (h Header) unique_keys() []string {
+	mut res := []string{cap: h.cur_pos}
+	mut seen := map[string]bool{}
+	for i := 0; i < h.cur_pos; i++ {
+		lower := h.data[i].key.to_lower()
+		if lower in seen {
+			continue
+		}
+		seen[lower] = true
+		res << h.data[i].key
+	}
+	return res
 }
 
 @[params]

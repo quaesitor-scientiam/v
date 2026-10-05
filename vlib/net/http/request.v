@@ -32,8 +32,26 @@ pub mut:
 	url        string
 	user_agent string = 'v.http'
 	verbose    bool
-	user_ptr   voidptr
-	proxy      &HttpProxy = unsafe { nil }
+	// remote_addr is the network address of the peer that sent this request,
+	// in `ip:port` form (`[ipv6]:port` for IPv6) -- the equivalent of Go's
+	// http.Request.RemoteAddr. `http.Server` fills it in for every request it
+	// hands to a `Handler`, over HTTP/1.1 and HTTP/2, plain and TLS, reading it
+	// straight off the accepted socket, so a client cannot forge it.
+	//
+	// It is empty for a request you build yourself to send with the client, and
+	// for one served by `veb`, which has its own server: use `ctx.ip()` there.
+	//
+	// A scoped IPv6 peer keeps its RFC 4007 zone, as in `[fe80::1%3]:8080`;
+	// without it a link-local address neither identifies an interface nor can
+	// be dialled back. The zone is the numeric interface index.
+	//
+	// When the server sits behind a reverse proxy this is the proxy's address.
+	// Recovering the original client then means trusting a header the proxy set
+	// (X-Forwarded-For, X-Real-Ip), which is only safe if nothing but that proxy
+	// can reach the server.
+	remote_addr string
+	user_ptr    voidptr
+	proxy       &HttpProxy = unsafe { nil }
 	// NOT implemented for ssl connections
 	// time = -1 for no timeout
 	read_timeout  i64 = 30 * time.second
@@ -46,8 +64,8 @@ pub mut:
 	in_memory_verification   bool // if true, verify, cert, and cert_key are read from memory, not from a file
 	allow_redirect           bool = true // whether to allow redirect
 	max_retries              int  = 5    // maximum number of retries required when an underlying socket error occurs
-	enable_http2             bool = true // when true (the default) and the URL is https, advertise ALPN `h2, http/1.1` and use HTTP/2 if the server selects it; set to false to force HTTP/1.1. Ignored for plain http://, and for the Windows SChannel backend which has no ALPN yet (see vlang/v#27383). on_progress / on_progress_body / stop_copying_limit / stop_receiving_limit are honored on the HTTP/2 path; on_progress fires per DATA frame payload rather than per raw network read.
-	enable_http3             bool // when true and the URL is https, use HTTP/3 (QUIC over UDP) for this request instead of the TCP-based HTTP/1.1/2 path. Opt-in only (default false) and, unlike enable_http2, never automatically probed: UDP has no fast-fail signal the way a closed TCP port does, so there is no automatic fallback to HTTP/1.1/2 if the h3 attempt fails or times out -- that decision is the caller's. Ignored for plain http://. req.cert/req.cert_key (mutual TLS) are not supported by this v1 HTTP/3 client; setting either alongside enable_http3 fails the request immediately rather than silently ignoring them. req.validate is also not honorable yet: net.quic's client TLS stack has no skip-verification mode at all (v1 limitation, unlike the h1/h2 ssl.SSLConn path), so certificate validation is always enforced regardless of this flag. **req.verify is effectively REQUIRED for HTTP/3 today**: net.quic's TLS 1.3 stack has no OS/default trust-store fallback of any kind (unlike the h1/h2 ssl.SSLConn path, which uses the platform's own trust store when req.verify is empty) -- leaving req.verify unset means every h3 request fails certificate verification against every real server, since there are no trust anchors to validate against at all. on_progress / on_progress_body / stop_copying_limit / stop_receiving_limit are not honored on the HTTP/3 path (see H3ClientRequest's own scope note).
+	enable_http2             bool // opt in to HTTP/2 for HTTPS: advertise ALPN `h2, http/1.1` and use HTTP/2 if selected. HTTP/1.1 is the default. Ignored for plain http://. Progress callbacks and receive limits work on HTTP/2; on_progress fires per DATA frame payload.
+	enable_http3             bool // when true and the URL is https, use HTTP/3 (QUIC over UDP) for this request instead of the TCP-based HTTP/1.1/2 path. **Requires building with `-d http3`**: the QUIC/TLS/QPACK stack is compiled only on demand so ordinary net.http and veb builds do not pay its compile-time cost -- without the flag, an enable_http3 request fails fast with a "not compiled in" error. Opt-in only (default false) and, unlike enable_http2, never automatically probed: UDP has no fast-fail signal the way a closed TCP port does, so there is no automatic fallback to HTTP/1.1/2 if the h3 attempt fails or times out -- that decision is the caller's. Ignored for plain http://. req.cert/req.cert_key (mutual TLS) are not supported by this v1 HTTP/3 client; setting either alongside enable_http3 fails the request immediately rather than silently ignoring them. req.validate is also not honorable yet: net.quic's client TLS stack has no skip-verification mode at all (v1 limitation, unlike the h1/h2 ssl.SSLConn path), so certificate validation is always enforced regardless of this flag. **req.verify is effectively REQUIRED for HTTP/3 today**: net.quic's TLS 1.3 stack has no OS/default trust-store fallback of any kind (unlike the h1/h2 ssl.SSLConn path, which uses the platform's own trust store when req.verify is empty) -- leaving req.verify unset means every h3 request fails certificate verification against every real server, since there are no trust anchors to validate against at all. on_progress / on_progress_body / stop_copying_limit / stop_receiving_limit are not honored on the HTTP/3 path (see H3ClientRequest's own scope note).
 	disable_connection_reuse bool // opt out of the shared connection pool: open a fresh connection for this request, send `Connection: close`, and close the connection after the response (the pre-pooling behavior)
 	// callbacks to allow custom reporting code to run, while the request is running, and to implement streaming
 	on_redirect      RequestRedirectFn     = unsafe { nil }
@@ -55,7 +73,7 @@ pub mut:
 	on_progress_body RequestProgressBodyFn = unsafe { nil }
 	on_finish        RequestFinishFn       = unsafe { nil }
 
-	stop_copying_limit   i64 = -1 // after this many bytes are received, stop copying to the response. Note that on_progress and on_progress_body callbacks, will continue to fire normally, until the full response is read, which allows you to implement streaming downloads, without keeping the whole big response in memory
+	stop_copying_limit   i64 = -1 // positive limits cap body bytes copied to the response. Progress callbacks continue until the full response is read
 	stop_receiving_limit i64 = -1 // after this many bytes are received, break out of the loop that reads the response, effectively stopping the request early. No more on_progress callbacks will be fired. The on_finish callback will fire.
 }
 
@@ -102,6 +120,16 @@ fn (mut req Request) free() {
 			user_agent.free()
 			freed_ptrs[user_agent_ptr] = true
 		}
+		// The mirrored `Remote-Addr` header above can share this buffer:
+		// set_remote_addr stores the address unchanged as the header value when
+		// there is no port to strip. The freed_ptrs guard is what keeps that
+		// from being a double free, here as for every other field.
+		mut remote_addr := req.remote_addr
+		remote_addr_ptr := u64(usize(remote_addr.str))
+		if remote_addr_ptr !in freed_ptrs {
+			remote_addr.free()
+			freed_ptrs[remote_addr_ptr] = true
+		}
 		mut verify := req.verify
 		verify_ptr := u64(usize(verify.str))
 		if verify_ptr !in freed_ptrs {
@@ -142,6 +170,50 @@ pub fn (mut req Request) add_custom_header(key string, val string) ! {
 	return req.header.add_custom(key, val)
 }
 
+// remote_ip returns just the IP part of `req.remote_addr`, without the port,
+// for example `127.0.0.1` or `::1`. A scoped IPv6 address keeps its zone
+// (`fe80::1%3`), which is part of the address rather than of the port.
+// It returns an empty string for a request that was not received by
+// `http.Server`. See `Request.remote_addr`.
+pub fn (req &Request) remote_ip() string {
+	return strip_addr_port(req.remote_addr)
+}
+
+// strip_addr_port drops the `:port` suffix of an `ip:port` address, handling
+// the bracketed `[::1]:8080` form that IPv6 addresses use. An RFC 4007 zone
+// sits inside the brackets (`[fe80::1%3]:8080`), so it survives untouched.
+fn strip_addr_port(addr string) string {
+	if addr.contains(']:') {
+		return addr.all_before(']:').all_after('[')
+	}
+	if addr.count(':') != 1 {
+		// A bare IPv6 address without a port, or an empty string: nothing to strip.
+		return addr
+	}
+	return addr.all_before(':')
+}
+
+// set_remote_addr records `addr` (an `ip:port` string read from the accepted
+// socket) as the address of the peer that sent this request, and mirrors it
+// into the legacy `Remote-Addr` header that the V server has always set.
+//
+// Any `Remote-Addr` header the client sent is dropped first, in any casing:
+// header lookups return the *first* match, so a client that sent its own
+// `Remote-Addr` would otherwise shadow the real one and hand every reader a
+// forged source address. The header is only a best-effort mirror -- headers
+// live in a fixed-size array, so a request that already filled it leaves no
+// room -- while `req.remote_addr` is always set.
+fn (mut req Request) set_remote_addr(addr string) {
+	req.remote_addr = addr
+	req.header.remove_custom_all('Remote-Addr')
+	if addr == '' {
+		return
+	}
+	if req.header.cur_pos < max_headers {
+		req.header.add_custom('Remote-Addr', strip_addr_port(addr)) or {}
+	}
+}
+
 // add_cookie adds a cookie to the request.
 pub fn (mut req Request) add_cookie(c Cookie) {
 	req.cookies[c.name] = c.value
@@ -160,6 +232,21 @@ pub fn (req &Request) cookie(name string) ?Cookie {
 		}
 	}
 	return none
+}
+
+// cookie_header_value returns the value net.http sends in the Cookie header,
+// combining request cookies and explicit Cookie field values.
+pub fn (req &Request) cookie_header_value() string {
+	return req.cookie_header_value_with_header(req.header)
+}
+
+fn (req &Request) cookie_header_value_with_header(header Header) string {
+	mut parts := []string{cap: req.cookies.len + header.values(.cookie).len}
+	for key, value in req.cookies {
+		parts << '${key}=${value}'
+	}
+	parts << header.values(.cookie)
+	return parts.join('; ')
 }
 
 // do will send the HTTP request and returns `http.Response` as soon as the response is received
@@ -308,12 +395,15 @@ fn (req &Request) method_and_url_to_response(method Method, url urllib.URL, data
 	return error('http.request.method_and_url_to_response: unsupported scheme: "${scheme}"')
 }
 
-fn (req &Request) build_request_headers(method Method, host_name string, port int, path string) string {
-	return req.build_request_headers_with(method, host_name, port, path, req.data, req.header)
+fn (req &Request) build_request_headers(method Method, host_name string, port int, path string) !string {
+	default_port := if port == 443 { 443 } else { 80 }
+	return req.build_request_headers_with(method, host_name, port, default_port, path, req.data,
+		req.header)
 }
 
-fn (req &Request) build_request_headers_with(method Method, host_name string, port int, path string, data string, header Header) string {
-	return req.build_request_headers_opts(method, host_name, port, path, data, header, true)
+fn (req &Request) build_request_headers_with(method Method, host_name string, port int, default_port int, path string, data string, header Header) !string {
+	return req.build_request_headers_opts(method, host_name, port, default_port, path, data,
+		header, true)
 }
 
 // build_request_headers_opts builds the raw HTTP/1.x request. With
@@ -321,7 +411,10 @@ fn (req &Request) build_request_headers_with(method Method, host_name string, po
 // one-shot behavior); the pooled keep-alive path passes false and emits no
 // Connection header, leaving the HTTP/1.1 default (keep-alive) in effect and
 // respecting any Connection header the caller set themselves.
-fn (req &Request) build_request_headers_opts(method Method, host_name string, port int, path string, data string, header Header, connection_close bool) string {
+fn (req &Request) build_request_headers_opts(method Method, host_name string, port int, default_port int, path string, data string, header Header, connection_close bool) !string {
+	if method == .trace && data != '' {
+		return error('net.http: TRACE requests must not carry a body')
+	}
 	mut sb := strings.new_builder(4096)
 	version := if req.version == .unknown { Version.v1_1 } else { req.version }
 	sb.write_string(method.str())
@@ -332,10 +425,11 @@ fn (req &Request) build_request_headers_opts(method Method, host_name string, po
 	sb.write_string('\r\n')
 	if !header.contains(.host) {
 		sb.write_string('Host: ')
-		if port != 80 && port != 443 && port != 0 {
-			sb.write_string('${host_name}:${port}')
+		wire_host := authority_host(host_name)
+		if port != default_port && port != 0 {
+			sb.write_string('${wire_host}:${port}')
 		} else {
-			sb.write_string(host_name)
+			sb.write_string(wire_host)
 		}
 		sb.write_string('\r\n')
 	}
@@ -345,7 +439,7 @@ fn (req &Request) build_request_headers_opts(method Method, host_name string, po
 		sb.write_string(ua)
 		sb.write_string('\r\n')
 	}
-	if !header.contains(.content_length) {
+	if method != .trace && !header.contains(.content_length) {
 		// Write Content-Length: 0 even if there's no content, since some APIs
 		// stop working without this header.
 		sb.write_string('Content-Length: ')
@@ -353,15 +447,27 @@ fn (req &Request) build_request_headers_opts(method Method, host_name string, po
 		sb.write_string('\r\n')
 	}
 	chkey := CommonHeader.cookie.str()
-	for key in header.keys() {
-		if key == chkey {
+	for key in header.unique_keys() {
+		if header_key_eq(key, chkey) {
 			continue
 		}
-		val := header.custom_values(key).join('; ')
-		sb.write_string(key)
-		sb.write_string(': ')
-		sb.write_string(val)
-		sb.write_string('\r\n')
+		values := header.custom_values(key).map(it.trim_space())
+		if values.len > 1 && values.last() == '' {
+			// A combined trailing empty member would end in OWS, which parsers
+			// remove. Separate lines preserve the empty value for signatures.
+			for value in values {
+				sb.write_string(key)
+				sb.write_string(': ')
+				sb.write_string(value)
+				sb.write_string('\r\n')
+			}
+		} else {
+			// RFC 9110 §5.2 permits combining repeated field lines with a comma.
+			sb.write_string(key)
+			sb.write_string(': ')
+			sb.write_string(values.join(', '))
+			sb.write_string('\r\n')
+		}
 	}
 	sb.write_string(req.build_request_cookies_header_with_header(header))
 	if connection_close {
@@ -377,37 +483,16 @@ fn (req &Request) build_request_cookies_header() string {
 }
 
 fn (req &Request) build_request_cookies_header_with_header(header Header) string {
-	if req.cookies.len < 1 {
+	value := req.cookie_header_value_with_header(header)
+	if value == '' && !header.contains(.cookie) {
 		return ''
 	}
-	mut sb_cookie := strings.new_builder(1024)
-	hvcookies := header.values(.cookie)
-	total_cookies := req.cookies.len + hvcookies.len
-	sb_cookie.write_string('Cookie: ')
-	mut idx := 0
-	for key, val in req.cookies {
-		sb_cookie.write_string(key)
-		sb_cookie.write_string('=')
-		sb_cookie.write_string(val)
-		if idx < total_cookies - 1 {
-			sb_cookie.write_string('; ')
-		}
-		idx++
-	}
-	for c in hvcookies {
-		sb_cookie.write_string(c)
-		if idx < total_cookies - 1 {
-			sb_cookie.write_string('; ')
-		}
-		idx++
-	}
-	sb_cookie.write_string('\r\n')
-	return sb_cookie.str()
+	return 'Cookie: ${value}\r\n'
 }
 
 fn (req &Request) http_do(host string, method Method, path string, data string, header Header) !Response {
 	host_name, port := net.split_address(host)!
-	s := req.build_request_headers_with(method, host_name, port, path, data, header)
+	s := req.build_request_headers_with(method, host_name, port, 80, path, data, header)!
 	mut client := net.dial_tcp(host)!
 	client.set_read_timeout(req.read_timeout)
 	client.set_write_timeout(req.write_timeout)
@@ -594,6 +679,8 @@ struct ReceivedResponseInfo {
 	headers_end         int = -1
 	is_chunked_transfer bool
 	has_truncated_body  bool
+	body_is_dechunked   bool
+	stop_copying_limit  i64 = -1
 	// reusable is true when the read loop terminated via precise response
 	// framing (Content-Length satisfied, chunked transfer complete, or a
 	// no-body status), meaning the connection holds no response leftovers and
@@ -603,11 +690,21 @@ struct ReceivedResponseInfo {
 }
 
 fn parse_received_response(response_text string, info ReceivedResponseInfo) !Response {
-	if info.is_chunked_transfer && info.has_truncated_body && info.headers_end > 0
-		&& info.headers_end <= response_text.len {
-		return parse_response(response_text[..info.headers_end])
+	mut response := if info.body_is_dechunked {
+		parse_response(response_text[..info.headers_end])!
+	} else {
+		parse_response(response_text)!
 	}
-	return parse_response(response_text)
+	if info.body_is_dechunked {
+		// Chunk framing is already removed, but Content-Encoding still applies.
+		response.body = decode_response_body(response_text[info.headers_end..],
+			response.header.get(.content_encoding) or { '' })
+	}
+	// A complete compressed body can expand beyond the copying limit.
+	if info.stop_copying_limit > 0 && response.body.len > info.stop_copying_limit {
+		response.body = response.body[..int(info.stop_copying_limit)]
+	}
+	return response
 }
 
 // response_has_no_body returns true when the HTTP method or status code
@@ -730,7 +827,9 @@ fn (req &Request) receive_all_data_from_cb_in_builder(mut content strings.Builde
 				}
 			}
 		}
-		if headers_end >= 0 && old_len < u64(headers_end) {
+		if headers_end < 0 {
+			bchunk = []u8{}
+		} else if old_len < u64(headers_end) {
 			header_bytes_in_chunk := int(u64(headers_end) - old_len)
 			if header_bytes_in_chunk >= len {
 				bchunk = []u8{}
@@ -744,8 +843,8 @@ fn (req &Request) receive_all_data_from_cb_in_builder(mut content strings.Builde
 		}
 		mut progress_body_so_far := body_so_far
 		mut chunked_complete := false
+		mut dechunked := []u8{}
 		if is_chunked_transfer {
-			mut dechunked := []u8{}
 			chunked_complete = chunked_body_tracker.advance(bchunk, mut dechunked)
 			progress_body_so_far = chunked_body_tracker.decoded_len
 			if req.on_progress_body != unsafe { nil } && dechunked.len > 0 {
@@ -755,10 +854,28 @@ fn (req &Request) receive_all_data_from_cb_in_builder(mut content strings.Builde
 		} else if req.on_progress_body != unsafe { nil } {
 			req.on_progress_body(req, bchunk, progress_body_so_far, expected_size, status_code)!
 		}
-		if !(req.stop_copying_limit > 0 && new_len > req.stop_copying_limit) {
+		if headers_end < 0 || req.stop_copying_limit <= 0 {
 			unsafe { content.write_ptr(bp, len) }
-		} else if headers_end >= 0 && new_len > body_pos {
-			has_truncated_body = true
+		} else {
+			// Preserve every header byte, even when the limit is small or the
+			// headers span multiple reads. Chunk framing does not count toward the limit.
+			if old_len < body_pos {
+				unsafe { content.write_ptr(bp, int(body_pos - old_len)) }
+			}
+			body_chunk := if is_chunked_transfer { dechunked } else { bchunk }
+			copied_body_len := i64(content.len - headers_end)
+			remaining := req.stop_copying_limit - copied_body_len
+			copy_len := if remaining <= 0 {
+				0
+			} else if remaining < body_chunk.len {
+				int(remaining)
+			} else {
+				body_chunk.len
+			}
+			content.write(body_chunk[..copy_len])!
+			if copy_len < body_chunk.len {
+				has_truncated_body = true
+			}
 		}
 		if is_chunked_transfer && chunked_complete {
 			framed_complete = true
@@ -789,6 +906,8 @@ fn (req &Request) receive_all_data_from_cb_in_builder(mut content strings.Builde
 	return ReceivedResponseInfo{
 		headers_end:         headers_end
 		is_chunked_transfer: is_chunked_transfer
+		body_is_dechunked:   is_chunked_transfer && req.stop_copying_limit > 0
+		stop_copying_limit:  req.stop_copying_limit
 		has_truncated_body:  has_truncated_body
 		reusable:            framed_complete
 	}
@@ -858,12 +977,10 @@ pub fn parse_request_head(mut reader io.BufferedReader) !Request {
 			// Skip space or tab in value name
 			pos++
 		}
-		if pos + 1 < line.len {
-			value := line[pos + 1..]
-			_, _ = key, value
-			// println('key,value=${key},${value}')
-			header.add_custom(key, value)!
-		}
+		value := if pos + 1 < line.len { line[pos + 1..] } else { '' }
+		// Preserve present empty fields; signature verification distinguishes
+		// an empty field value from a missing field.
+		header.add_custom(key, value)!
 		line = reader.read_line()!
 	}
 	// header.coerce(canonicalize: true)
@@ -921,10 +1038,8 @@ pub fn parse_request_head_str(s string) !Request {
 			val_start++
 		}
 
-		if val_start < line.len {
-			value := line[val_start..]
-			header.add_custom(key, value)!
-		}
+		value := if val_start < line.len { line[val_start..] } else { '' }
+		header.add_custom(key, value)!
 		line_start = line_end + 1
 	}
 

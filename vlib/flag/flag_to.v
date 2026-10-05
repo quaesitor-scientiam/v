@@ -1,7 +1,5 @@
 module flag
 
-import v.ast
-
 struct FlagData {
 	raw        string @[required]
 	field_name string @[required]
@@ -27,11 +25,11 @@ pub enum ParseMode {
 
 pub enum Style {
 	short         // Posix short only, allows multiple shorts -def is `-d -e -f` and "sticky" arguments e.g.: `-ofoo` = `-o foo`
-	long          // GNU style long option *only*. E.g.: `--name` or `--name=value`
-	short_long    // extends `posix` style shorts with GNU style long options: `--flag` or `--name=value`
+	long          // GNU style long option *only*. E.g.: `--name`, `--name=value` or `--name value`
+	short_long    // extends `posix` style shorts with GNU style long options: `--flag`, `--name=value` or `--name value`. A single dash exact long name, e.g. `-name value`, is also accepted
 	v             // V style flags as found in flags for the `v` compiler. Single flag denote `-` followed by string identifier e.g.: `-verbose`, `-name value`, `-v`, `-n value` or `-d ident=value`
 	v_flag_parser // V `flag.FlagParser` style flags as supported by `flag.FlagParser`. Long flag denote `--` followed by string identifier e.g.: `--verbose`, `--name value`, `-v` or `-n value`.
-	go_flag       // GO `flag` module style. Single flag denote `-` followed by string identifier e.g.: `-verbose`, `-name value`, `-v` or `-n value` and both long `--name value` and GNU long `--name=value`
+	go_flag       // GO `flag` module style. Single flag denote `-` followed by string identifier e.g.: `-verbose`, `-name value`, `-name=value`, `-v` or `-n value` and both long `--name value` and GNU long `--name=value`
 	cmd_exe       // `cmd.exe` style flags. Single flag denote `/` followed by lower- or upper-case character
 }
 
@@ -115,19 +113,16 @@ fn assign_single_flag_value[T](mut target T, default_value T, f FlagData, struct
 		}
 		target = a_or_r.u8()
 	} $else $if T is f32 {
-		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.f32()
+		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.f32()
 	} $else $if T is f64 {
-		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.f64()
+		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.f64()
 	} $else $if T is bool {
 		if arg := f.arg {
 			return error('can not assign `${arg}` to bool field `${field_name}`')
 		}
 		target = !default_value
 	} $else $if T is string {
-		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.str()
+		target = f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.str()
 	} $else {
 		return error('field type: ${T.name} for ${field_name} is not supported')
 	}
@@ -135,41 +130,29 @@ fn assign_single_flag_value[T](mut target T, default_value T, f FlagData, struct
 
 fn append_multi_flag_value[T](mut target T, f FlagData, field_name string) ! {
 	$if T is []string {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.str()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.str()
 	} $else $if T is []int {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.int()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.int()
 	} $else $if T is []i64 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.i64()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.i64()
 	} $else $if T is []u64 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.u64()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.u64()
 	} $else $if T is []i32 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.i32()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.i32()
 	} $else $if T is []u32 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.u32()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.u32()
 	} $else $if T is []i16 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.i16()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.i16()
 	} $else $if T is []u16 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.u16()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.u16()
 	} $else $if T is []i8 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.i8()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.i8()
 	} $else $if T is []u8 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.u8()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.u8()
 	} $else $if T is []f32 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.f32()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.f32()
 	} $else $if T is []f64 {
-		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }
-			.f64()
+		target << f.arg or { return error('failed appending ${f.raw} to ${field_name}') }.f64()
 	} $else {
 		return error('field type: ${T.name} for multi value ${field_name} is not supported')
 	}
@@ -189,7 +172,7 @@ fn (sf StructField) shortest_match_name() ?string {
 @[params]
 pub struct ParseConfig {
 pub:
-	delimiter string    = '-'         // delimiter used for flags
+	delimiter string    = '-'           // delimiter used for flags
 	mode      ParseMode = .strict     // return errors for unknown or malformed flags per default
 	style     Style     = .short_long // expected flag style
 	stop      ?string // single, usually '--', string that stops parsing flags/options
@@ -199,7 +182,7 @@ pub:
 @[params]
 pub struct DocConfig {
 pub:
-	delimiter string = '-'         // delimiter used for flags
+	delimiter string = '-'           // delimiter used for flags
 	style     Style  = .short_long // expected flag style
 pub mut:
 	name        string            // application name
@@ -351,17 +334,7 @@ fn (fm FlagMapper) get_struct_info[T]() !StructInfo {
 			trace_println('\tmatch name: "${match_name}"')
 			used_names << match_name
 
-			if field.typ in [
-				int(ast.int_type),
-				int(ast.i64_type),
-				int(ast.u64_type),
-				int(ast.i32_type),
-				int(ast.u32_type),
-				int(ast.i16_type),
-				int(ast.u16_type),
-				int(ast.i8_type),
-				int(ast.u8_type),
-			] {
+			$if field.typ is $int {
 				hints.set(.is_int_type)
 			}
 
@@ -375,7 +348,7 @@ fn (fm FlagMapper) get_struct_info[T]() !StructInfo {
 				hints.set(.is_ignore)
 			}
 
-			if field.typ == int(ast.bool_type) {
+			$if field.typ is bool {
 				trace_println('\tfield "${field.name}" is a bool')
 				hints.set(.is_bool)
 			}
@@ -506,24 +479,27 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 	}
 
 	for pos, arg in args {
+		mut pos_is_handled := pos in fm.handled_pos
+		if pos_is_handled {
+			// Skipped via `config.skip` or already consumed as the argument of a previous flag. E.g.: `--name -value`
+			trace_dbg_println('${@FN}: skipping position "${pos}". Already handled')
+			continue
+		}
 		if arg == '' {
 			fm.no_match << pos
 			continue
 		}
-		mut pos_is_handled := pos in fm.handled_pos
 
-		if !pos_is_handled {
-			// Stop parsing as soon as possible if `--` (or user defined) stop option is sat and encountered
-			if arg == config.stop or { '' } {
-				trace_println('${@FN}: reached option stop (${config.stop}) at index ${pos}')
-				// record all positions after this as not matching, unless pos is the last entry
-				if pos < args.len - 1 {
-					for unused_pos in pos + 1 .. args.len {
-						fm.no_match << unused_pos
-					}
+		// Stop parsing as soon as possible if `--` (or user defined) stop option is sat and encountered
+		if arg == config.stop or { '' } {
+			trace_println('${@FN}: reached option stop (${config.stop}) at index ${pos}')
+			// record all positions after this as not matching, unless pos is the last entry
+			if pos < args.len - 1 {
+				for unused_pos in pos + 1 .. args.len {
+					fm.no_match << unused_pos
 				}
-				break
 			}
+			break
 		}
 
 		// peek next arg
@@ -548,6 +524,11 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 			is_long_delimiter := used_delimiter.count(delimiter) == 2
 			is_short_delimiter := used_delimiter.count(delimiter) == 1
 			is_invalid_delimiter := !is_long_delimiter && !is_short_delimiter
+			// In `.short_long` style, a short delimiter flag exactly matching a long flag name is mapped as a long flag,
+			// like GO's `flag` module and GNU's `getopt_long_only()` do. E.g.: `-name value` = `--name value`
+			is_long_name := is_short_delimiter && style == .short_long && flag_name.len > 1
+				&& fm.si.fields.values().any(!it.hints.has(.short_only)
+					&& !it.hints.has(.is_ignore) && it.match_name == flag_name)
 			if is_invalid_delimiter {
 				if config.mode == .relaxed {
 					fm.no_match << pos
@@ -580,7 +561,8 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 					}
 					return error('short delimiter `${used_delimiter}` encountered in flag `${arg}` in ${style} (GNU) style parsing mode')
 				}
-				if style == .short_long && flag_name.len > 1 && flag_name.contains('-') {
+				if style == .short_long && flag_name.len > 1 && flag_name.contains('-')
+					&& !is_long_name {
 					if config.mode == .relaxed {
 						fm.no_match << pos
 						continue
@@ -606,7 +588,7 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 			}
 
 			// Identify and match short clusters first. Example: `-yxz( arg)` = `-y -x -z( arg)`
-			if is_short_delimiter && style in [.short, .short_long] {
+			if is_short_delimiter && !is_long_name && style in [.short, .short_long] {
 				fm.map_posix_short_cluster(flag_ctx)!
 			}
 
@@ -641,7 +623,7 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 					trace_println('${@FN}: skipping long delimiter `${used_delimiter}` match for ${struct_name}.${field.name} since it has [only: ${field.short}]')
 				}
 
-				if is_short_delimiter {
+				if is_short_delimiter && !is_long_name {
 					if style in [.short, .short_long] {
 						if fm.map_posix_short(flag_ctx, field)! {
 							continue
@@ -665,8 +647,8 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 					}
 				}
 
-				if is_long_delimiter {
-					// Parse GNU `--name=value`
+				if is_long_delimiter || is_long_name {
+					// Parse GNU `--name=value` or `--name value`
 					if style in [.long, .short_long] {
 						if fm.map_gnu_long(flag_ctx, field)! {
 							continue
@@ -711,7 +693,8 @@ pub fn (mut fm FlagMapper) parse[T]() ! {
 							fm.add_array_flag(field.name, FlagData{
 								raw:        arg
 								field_name: field.name
-								arg:        ?string(arg) // .arg is used when assigning at comptime to []XYZ
+								// .arg is used when assigning at comptime to []XYZ
+								arg:        ?string(arg)
 								pos:        pos
 							})
 						} else {
@@ -908,14 +891,12 @@ pub fn (fm FlagMapper) fields_docs(dc DocConfig) ![]string {
 			// This makes sure the description is put on a new line if the flag line is
 			// longer than the padding.
 			diff := -flag_line_diff
-			line := flag_line + ' '.repeat(diff) +
-				keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
+			line := flag_line + ' '.repeat(diff) + keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
 			docs << line.trim_space_right()
 		} else {
 			docs << flag_line.trim_space_right()
 			if doc != '' {
-				line := empty_padding +
-					keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
+				line := empty_padding + keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
 				docs << line.trim_space_right()
 			}
 		}
@@ -931,13 +912,11 @@ pub fn (fm FlagMapper) fields_docs(dc DocConfig) ![]string {
 				// This makes sure the description is put on a new line if the flag line is
 				// longer than the padding.
 				diff := -flag_line_diff
-				line := indent_flags_padding + entry.trim(' ') + ' '.repeat(diff) +
-					keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
+				line := indent_flags_padding + entry.trim(' ') + ' '.repeat(diff) + keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
 				docs << line.trim_space_right()
 			} else {
 				docs << indent_flags_padding + entry.trim(' ')
-				line := empty_padding +
-					keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
+				line := empty_padding + keep_at_max(doc, desc_max).replace('\n', '\n${empty_padding}')
 				docs << line.trim_space_right()
 			}
 			if !dc.options.compact {
@@ -1002,8 +981,7 @@ pub fn (fm FlagMapper) to_struct[T](defaults ?T) !T {
 		struct_name := T.name.all_after_last('.')
 		$for field in T.fields {
 			if f := fm.field_map_flag[field.name] {
-				assign_single_flag_value(mut result.$(field.name), the_default.$(field.name), f,
-					struct_name, field.name)!
+				assign_single_flag_value(mut result.$(field.name), the_default.$(field.name), f, struct_name, field.name)!
 			}
 			for f in fm.array_field_map_flag[field.name] {
 				append_multi_flag_value(mut result.$(field.name), f, field.name)!
@@ -1031,8 +1009,7 @@ fn (mut fm FlagMapper) map_v(flag_ctx FlagContext, field StructField) !bool {
 			if arg != '' {
 				return error('flag `${flag_raw}` can not be assigned to bool field "${field.name}"')
 			}
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1047,8 +1024,7 @@ fn (mut fm FlagMapper) map_v(flag_ctx FlagContext, field StructField) !bool {
 
 	if flag_name == field.match_name || flag_name == field.short {
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (V style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for (V style multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1058,8 +1034,7 @@ fn (mut fm FlagMapper) map_v(flag_ctx FlagContext, field StructField) !bool {
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for (V style) ${fm.dbg_match(flag_ctx, field, next,
-				'')}')
+			trace_println('${@FN}: found match for (V style) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1095,8 +1070,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_short(flag_ctx FlagContext, field Struc
 
 	if field.hints.has(.is_bool) {
 		if flag_name == field.match_name || flag_name == field.short {
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1111,8 +1085,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_short(flag_ctx FlagContext, field Struc
 
 	if flag_name == field.match_name || flag_name == field.short {
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for V (`flag.FlagParser` (short) style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for V (`flag.FlagParser` (short) style multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1122,8 +1095,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_short(flag_ctx FlagContext, field Struc
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for V (`flag.FlagParser` (short) style) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for V (`flag.FlagParser` (short) style) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1155,8 +1127,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_long(flag_ctx FlagContext, field Struct
 
 	if field.hints.has(.is_bool) {
 		if flag_name == field.match_name {
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1171,8 +1142,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_long(flag_ctx FlagContext, field Struct
 
 	if flag_name == field.match_name || flag_name == field.short {
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (V `flag.FlagParser` (long) style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for (V `flag.FlagParser` (long) style multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1182,8 +1152,7 @@ fn (mut fm FlagMapper) map_v_flag_parser_long(flag_ctx FlagContext, field Struct
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for V (`flag.FlagParser` (long) style) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for V (`flag.FlagParser` (long) style) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1200,6 +1169,19 @@ fn (mut fm FlagMapper) map_v_flag_parser_long(flag_ctx FlagContext, field Struct
 	return false
 }
 
+// flag_arg returns the argument of the (non-bool) flag in `flag_ctx`, given either as `--name=value`
+// or, like GNU's `getopt_long()` and GO's `flag` module allow, as the next argument: `--name value`.
+// The returned `bool` is `true` when the next argument is used.
+fn (fm FlagMapper) flag_arg(flag_ctx FlagContext, field StructField) !(string, bool) {
+	if flag_ctx.raw.contains('=') {
+		return flag_ctx.raw.all_after('='), false
+	}
+	if flag_ctx.pos + 1 >= fm.input.len {
+		return error('flag `${flag_ctx.raw}` mapping to `${field.name}` expects an argument. E.g.: `${flag_ctx.raw} value` or `${flag_ctx.raw}=value`')
+	}
+	return flag_ctx.next, true
+}
+
 // map_go_flag_short returns `true` if the GO short style flag in `flag_ctx` can be mapped to `field`.
 // map_go_flag_short adds data of the match in the internal structures for further processing if applicable
 fn (mut fm FlagMapper) map_go_flag_short(flag_ctx FlagContext, field StructField) !bool {
@@ -1207,7 +1189,6 @@ fn (mut fm FlagMapper) map_go_flag_short(flag_ctx FlagContext, field StructField
 	flag_name := flag_ctx.name
 	pos := flag_ctx.pos
 	used_delimiter := flag_ctx.delimiter
-	next := flag_ctx.next
 
 	if field.hints.has(.is_bool) {
 		if flag_name == field.match_name {
@@ -1215,8 +1196,7 @@ fn (mut fm FlagMapper) map_go_flag_short(flag_ctx FlagContext, field StructField
 			if arg != '' {
 				return error('flag `${flag_raw}` can not be assigned to bool field "${field.name}"')
 			}
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1230,31 +1210,33 @@ fn (mut fm FlagMapper) map_go_flag_short(flag_ctx FlagContext, field StructField
 	}
 
 	if flag_name == field.match_name || flag_name == field.short {
+		// GO `flag` style `-name value` or `-name=value`
+		arg, next_is_used := fm.flag_arg(flag_ctx, field)!
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (GO short style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for (GO short style multiple occurrences) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
 				delimiter:  used_delimiter
 				name:       flag_name
-				arg:        ?string(next)
+				arg:        ?string(arg)
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for (GO short style) ${fm.dbg_match(flag_ctx, field,
-				next, '')}')
+			trace_println('${@FN}: found match for (GO short style) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
 				delimiter:  used_delimiter
 				name:       flag_name
-				arg:        ?string(next)
+				arg:        ?string(arg)
 				pos:        pos
 			}
 		}
 		fm.handled_pos << pos
-		fm.handled_pos << pos + 1 // arg
+		if next_is_used {
+			fm.handled_pos << pos + 1 // arg
+		}
 		return true
 	}
 	return false
@@ -1274,8 +1256,7 @@ fn (mut fm FlagMapper) map_go_flag_long(flag_ctx FlagContext, field StructField)
 			if arg != '' {
 				return error('flag `${flag_raw}` can not be assigned to bool field "${field.name}"')
 			}
-			trace_println('${@FN}: found match for (bool) (GO `flag` style) ${fm.dbg_match(flag_ctx,
-				field, 'true', '')}')
+			trace_println('${@FN}: found match for (bool) (GO `flag` style) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1287,17 +1268,12 @@ fn (mut fm FlagMapper) map_go_flag_long(flag_ctx FlagContext, field StructField)
 			return true
 		}
 
-		if !flag_raw.contains('=') {
-			if field.hints.has(.is_int_type) && field.hints.has(.can_repeat) {
-				return error('field `${field.name}` has @[repeats], only POSIX short style allows repeating')
-			}
-			return error('long delimiter `${used_delimiter}` flag `${flag_raw}` mapping to `${field.name}` in ${fm.config.style} style parsing mode, expects GO (GNU) style assignment. E.g.: --name=value')
+		if !flag_raw.contains('=') && field.hints.has(.is_int_type) && field.hints.has(.can_repeat) {
+			return error('field `${field.name}` has @[repeats], only POSIX short style allows repeating')
 		}
-
-		arg := if flag_raw.contains('=') { flag_raw.all_after('=') } else { '' }
+		arg, next_is_used := fm.flag_arg(flag_ctx, field)!
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (GO `flag` style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, arg, '')}')
+			trace_println('${@FN}: found match for (GO `flag` style multiple occurrences) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1307,8 +1283,7 @@ fn (mut fm FlagMapper) map_go_flag_long(flag_ctx FlagContext, field StructField)
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for (GO `flag` style) ${fm.dbg_match(flag_ctx,
-				field, arg, '')}')
+			trace_println('${@FN}: found match for (GO `flag` style) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1318,7 +1293,10 @@ fn (mut fm FlagMapper) map_go_flag_long(flag_ctx FlagContext, field StructField)
 				pos:        pos
 			}
 		}
-		fm.handled_pos << pos // NOTE: arg is part of the flag in GO (GNU) long style args
+		fm.handled_pos << pos
+		if next_is_used {
+			fm.handled_pos << pos + 1 // arg
+		}
 		return true
 	}
 	return false
@@ -1338,8 +1316,7 @@ fn (mut fm FlagMapper) map_gnu_long(flag_ctx FlagContext, field StructField) !bo
 			if arg != '' {
 				return error('flag `${flag_raw}` can not be assigned to bool field "${field.name}"')
 			}
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1349,17 +1326,14 @@ fn (mut fm FlagMapper) map_gnu_long(flag_ctx FlagContext, field StructField) !bo
 			}
 			fm.handled_pos << pos
 			return true
-		} else if fm.config.style in [.long, .short_long] && !flag_raw.contains('=') {
-			if field.hints.has(.is_int_type) && field.hints.has(.can_repeat) {
-				return error('field `${field.name}` has @[repeats], only POSIX short style allows repeating')
-			}
-			return error('long delimiter `${used_delimiter}` flag `${flag_raw}` mapping to `${field.name}` in ${fm.config.style} style parsing mode, expects GNU style assignment. E.g.: --name=value')
 		}
 
-		arg := if flag_raw.contains('=') { flag_raw.all_after('=') } else { '' }
+		if !flag_raw.contains('=') && field.hints.has(.is_int_type) && field.hints.has(.can_repeat) {
+			return error('field `${field.name}` has @[repeats], only POSIX short style allows repeating')
+		}
+		arg, next_is_used := fm.flag_arg(flag_ctx, field)!
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (GNU style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, arg, '')}')
+			trace_println('${@FN}: found match for (GNU style multiple occurrences) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1369,8 +1343,7 @@ fn (mut fm FlagMapper) map_gnu_long(flag_ctx FlagContext, field StructField) !bo
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for (GNU style) ${fm.dbg_match(flag_ctx, field, arg,
-				'')}')
+			trace_println('${@FN}: found match for (GNU style) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1380,7 +1353,10 @@ fn (mut fm FlagMapper) map_gnu_long(flag_ctx FlagContext, field StructField) !bo
 				pos:        pos
 			}
 		}
-		fm.handled_pos << pos // NOTE: arg is part of the flag in GNU long style args
+		fm.handled_pos << pos
+		if next_is_used {
+			fm.handled_pos << pos + 1 // arg
+		}
 		return true
 	}
 	return false
@@ -1423,6 +1399,21 @@ fn (mut fm FlagMapper) map_posix_short_cluster(flag_ctx FlagContext) ! {
 			return
 		}
 
+		// Every flag in the cluster must be known, up to one that takes the rest as its argument. E.g.: `-vxf` = `-v -x -f`
+		for mflag in split {
+			field := matched_fields[mflag] or {
+				if fm.config.mode == .relaxed {
+					fm.no_match << flag_ctx.pos
+					fm.handled_pos << flag_ctx.pos
+					return
+				}
+				return error('unknown flag `${flag_ctx.delimiter}${mflag}` in short flag cluster `${flag_ctx.raw}`')
+			}
+			if !field.hints.has(.is_bool) && !field.hints.has(.can_repeat) {
+				break
+			}
+		}
+
 		// Iterate `split` instead of `matched_fields` since the order of appearance has significance
 		for i := 0; i < split.len; i++ {
 			mflag := split[i]
@@ -1436,8 +1427,7 @@ fn (mut fm FlagMapper) map_posix_short_cluster(flag_ctx FlagContext) ! {
 					pos:        flag_ctx.pos
 				}
 				if field.hints.has(.is_bool) {
-					trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field,
-						'true', '')}')
+					trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 					fm.field_map_flag[mf.field_name] = mf
 					fm.handled_pos << flag_ctx.pos
 				} else if field.hints.has(.can_repeat) {
@@ -1446,8 +1436,7 @@ fn (mut fm FlagMapper) map_posix_short_cluster(flag_ctx FlagContext) ! {
 					} else {
 						1
 					}
-					trace_println('${@FN}: found match for (repeatable cluster) ${fm.dbg_match(flag_ctx,
-						field, '${repeats}', '')}')
+					trace_println('${@FN}: found match for (repeatable cluster) ${fm.dbg_match(flag_ctx, field, '${repeats}', '')}')
 					fm.field_map_flag[mf.field_name] = FlagData{
 						...mf
 						repeats: repeats
@@ -1467,11 +1456,9 @@ fn (mut fm FlagMapper) map_posix_short_cluster(flag_ctx FlagContext) ! {
 							...mf
 							arg: ?string(arg)
 						})
-						trace_println('${@FN}: found match for (array) ${fm.dbg_match(flag_ctx,
-							field, arg, '')}')
+						trace_println('${@FN}: found match for (array) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 					} else {
-						trace_println('${@FN}: found match for (other) ${fm.dbg_match(flag_ctx,
-							field, arg, '')}')
+						trace_println('${@FN}: found match for (other) ${fm.dbg_match(flag_ctx, field, arg, '')}')
 						fm.field_map_flag[mf.field_name] = FlagData{
 							...mf
 							arg: ?string(arg)
@@ -1510,8 +1497,7 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 			if arg != '' {
 				return error('flag `${flag_raw}` can not be assigned to bool field "${field.name}"')
 			}
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1524,8 +1510,7 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 		}
 
 		if field.short == flag_name {
-			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true',
-				'')}')
+			trace_println('${@FN}: found match for (bool) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1543,8 +1528,7 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 		if field.hints.has(.can_repeat) {
 			mut do_continue := false
 			if count_of_first_letter_repeats == flag_name.len {
-				trace_println('${@FN}: found match for (repeatable) ${fm.dbg_match(flag_ctx, field,
-					'true', '')}')
+				trace_println('${@FN}: found match for (repeatable) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 				fm.field_map_flag[field.name] = FlagData{
 					raw:        flag_raw
 					field_name: field.name
@@ -1558,16 +1542,14 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 
 				if next_first_letter == first_letter
 					&& count_of_next_first_letter_repeats == next.len {
-					trace_println('${@FN}: field "${field.name}" allow repeats and ${flag_raw} ${next} repeats ${
-						count_of_next_first_letter_repeats + count_of_first_letter_repeats} times (via argument)')
+					trace_println('${@FN}: field "${field.name}" allow repeats and ${flag_raw} ${next} repeats ${count_of_next_first_letter_repeats + count_of_first_letter_repeats} times (via argument)')
 					fm.field_map_flag[field.name] = FlagData{
 						raw:        flag_raw
 						field_name: field.name
 						delimiter:  used_delimiter
 						name:       flag_name
 						pos:        pos
-						repeats:    count_of_next_first_letter_repeats +
-							count_of_first_letter_repeats
+						repeats:    count_of_next_first_letter_repeats + count_of_first_letter_repeats
 					}
 					fm.handled_pos << pos
 					fm.handled_pos << pos + 1 // next
@@ -1591,8 +1573,7 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 			if next == '' {
 				return error('flag "${flag_raw}" expects an argument')
 			}
-			trace_println('${@FN}: found match for (multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for (multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
@@ -1609,8 +1590,7 @@ fn (mut fm FlagMapper) map_posix_short(flag_ctx FlagContext, field StructField) 
 			return true
 		} else if !flag_ctx.next.starts_with(used_delimiter) {
 			if field.short == flag_name {
-				trace_println('${@FN}: found match for (${field.type_name}) ${fm.dbg_match(flag_ctx,
-					field, next, '')}')
+				trace_println('${@FN}: found match for (${field.type_name}) ${fm.dbg_match(flag_ctx, field, next, '')}')
 				fm.field_map_flag[field.name] = FlagData{
 					raw:        flag_raw
 					field_name: field.name
@@ -1686,8 +1666,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 
 	if flag_name == field.match_name {
 		if field.hints.has(.is_bool) {
-			trace_println('${@FN}: found (long) match for (bool) (CMD.EXE style) ${fm.dbg_match(flag_ctx,
-				field, 'true', '')}')
+			trace_println('${@FN}: found (long) match for (bool) (CMD.EXE style) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1700,8 +1679,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 		}
 		// Not sure original CMD.EXE flags supported multiple flags with same name??
 		if field.hints.has(.is_array) {
-			trace_println('${@FN}: found match for (CMD.EXE style multiple occurrences) ${fm.dbg_match(flag_ctx,
-				field, next, '')}')
+			trace_println('${@FN}: found match for (CMD.EXE style multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.add_array_flag(field.name, FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1711,8 +1689,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 				pos:        pos
 			})
 		} else {
-			trace_println('${@FN}: found match for (CMD.EXE style) ${fm.dbg_match(flag_ctx, field,
-				next, '')}')
+			trace_println('${@FN}: found match for (CMD.EXE style) ${fm.dbg_match(flag_ctx, field, next, '')}')
 			fm.field_map_flag[field.name] = FlagData{
 				raw:        flag_raw
 				field_name: field.name
@@ -1730,8 +1707,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 	if shortest_match_name := field.shortest_match_name() {
 		if flag_name == shortest_match_name {
 			if field.hints.has(.is_bool) {
-				trace_println('${@FN}: found match for (bool) (CMD.EXE style) ${fm.dbg_match(flag_ctx,
-					field, 'true', '')}')
+				trace_println('${@FN}: found match for (bool) (CMD.EXE style) ${fm.dbg_match(flag_ctx, field, 'true', '')}')
 				fm.field_map_flag[field.name] = FlagData{
 					raw:        flag_raw
 					field_name: field.name
@@ -1745,8 +1721,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 
 			// Not sure original CMD.EXE flags supported multiple flags with same name??
 			if field.hints.has(.is_array) {
-				trace_println('${@FN}: found match for (CMD.EXE style multiple occurrences) ${fm.dbg_match(flag_ctx,
-					field, next, '')}')
+				trace_println('${@FN}: found match for (CMD.EXE style multiple occurrences) ${fm.dbg_match(flag_ctx, field, next, '')}')
 				fm.add_array_flag(field.name, FlagData{
 					raw:        flag_raw
 					field_name: field.name
@@ -1756,8 +1731,7 @@ fn (mut fm FlagMapper) map_cmd_exe(flag_ctx FlagContext, field StructField) !boo
 					pos:        pos
 				})
 			} else {
-				trace_println('${@FN}: found match for (CMD.EXE style) ${fm.dbg_match(flag_ctx,
-					field, next, '')}')
+				trace_println('${@FN}: found match for (CMD.EXE style) ${fm.dbg_match(flag_ctx, field, next, '')}')
 				fm.field_map_flag[field.name] = FlagData{
 					raw:        flag_raw
 					field_name: field.name

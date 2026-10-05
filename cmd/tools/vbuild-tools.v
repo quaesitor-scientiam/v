@@ -11,8 +11,8 @@ import v.util
 // should be compiled (v folder).
 // To implement that, these folders are initially skipped, then added
 // as a whole *after the testing.prepare_test_session call*.
-const tools_in_subfolders = ['fast', 'vast', 'vcreate', 'vdoc', 'vpm', 'vsqlite', 'vsymlink', 'vvet',
-	'vwhere', 'vcover']
+const tools_in_subfolders = ['fast', 'vast', 'vcreate', 'vdoc', 'vpbgen', 'vpm', 'vsqlite', 'vsymlink',
+	'vvet', 'vwhere', 'vcover', 'vmcp', 'vskills']
 
 // v2 is temporarily disabled, so tools that depend on it are skipped too.
 const temporarily_disabled_tool_subfolders = ['vast2']
@@ -53,13 +53,20 @@ fn main() {
 	// eprintln('> session.skip_files: ${session.skip_files}')
 	session.test()
 	eprintln(session.benchmark.total_message(finish_label))
-	if session.failed_cmds.len > 0 {
+	if session.has_failures() {
 		exit(1)
+	}
+	// Check-only invocations do not produce a temporary directory of executables to install.
+	if os.args[1..].any(it in ['-check', '-c']) {
+		return
 	}
 
 	mut executables := os.ls(session.vtmp_dir)!
 	executables.sort()
 	for texe in executables {
+		if texe == '.v.mod.stop' {
+			continue
+		}
 		tname := texe.replace(os.file_ext(texe), '')
 		if tname in non_packaged_tools {
 			continue

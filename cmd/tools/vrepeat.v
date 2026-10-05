@@ -225,7 +225,11 @@ fn (mut context Context) run() {
 					context.flushed_print('${line_prefix}, warm up run: ${i + 1:4}/${context.warmup:-4}, took: ${f64(duration) / 1000:6.1f}ms ...')
 					context.verbose_command(cmd)
 					mut sw := time.new_stopwatch()
-					res := os.execute(cmd)
+					res := os.exec(if os.user_os() == 'windows' {
+						['cmd.exe', '/d', '/s', '/c', cmd]
+					} else {
+						['sh', '-c', cmd]
+					})
 					duration = i64(sw.elapsed().microseconds())
 					context.verbose_result(res)
 					mut should_show_fail_output := false
@@ -246,7 +250,11 @@ fn (mut context Context) run() {
 			for i in 0 .. context.run_count {
 				context.verbose_command(cmd)
 				mut sw := time.new_stopwatch()
-				res := os.execute(cmd)
+				res := os.exec(if os.user_os() == 'windows' {
+					['cmd.exe', '/d', '/s', '/c', cmd]
+				} else {
+					['sh', '-c', cmd]
+				})
 				duration = i64(sw.elapsed().microseconds())
 				context.verbose_result(res)
 				//
@@ -261,8 +269,7 @@ fn (mut context Context) run() {
 				runs++
 				avg = (f64(sum) / f64(i + 1))
 				cavg := '${avg / 1000:9.3f}ms'
-				context.flushed_print('${line_prefix}, current average: ${c(tgreen, cavg)}, run ${
-					i + 1:4}/${context.run_count:-4}, took: ${f64(duration) / 1000:6} ms')
+				context.flushed_print('${line_prefix}, current average: ${c(tgreen, cavg)}, run ${i + 1:4}/${context.run_count:-4}, took: ${f64(duration) / 1000:6} ms')
 				if context.show_output {
 					context.flushed_print(' | result: ${oldres:s}')
 				}

@@ -9,22 +9,22 @@ mut:
 }
 
 fn (mut ctx Context) analyze_line(line string, position_file string, position_line int) {
-	blame_for_time := os.execute('git blame -L${position_line} --porcelain -- ${position_file}')
+	blame_for_time := os.exec(['git', 'blame', '-L' + '${position_line}', '--porcelain', '--',
+		position_file])
 	if blame_for_time.exit_code != 0 {
 		return
 	}
 	ts := blame_for_time.output.all_after('committer-time').all_before('\n').trim_space().int()
 	t := time.unix(ts)
 	if ctx.cut_time < t {
-		println(term.colorize(term.gray,
-			'>>> SKIPPING since t: ${t} > ${ctx.cut_time}, ${position_file}:${position_line}: ${line}'))
+		println(term.colorize(term.gray, '>>> SKIPPING since t: ${t} > ${ctx.cut_time}, ${position_file}:${position_line}: ${line}'))
 		return
 	}
 	ctx.deprecations++
-	blame_for_context := os.execute('git blame -L${position_line},+5 -- ${position_file}')
+	blame_for_context := os.exec(['git', 'blame', '-L' + '${position_line}' + ',+5', '--',
+		position_file])
 	context := blame_for_context.output.trim_space().split_into_lines()
-	println(term.colorize(term.red,
-		'${position_file}:${position_line}: deprecation: ${ctx.deprecations}, timestamp: ${ts} - ${t}'))
+	println(term.colorize(term.red, '${position_file}:${position_line}: deprecation: ${ctx.deprecations}, timestamp: ${ts} - ${t}'))
 	for cline in context {
 		println('    ${cline}')
 	}
@@ -44,8 +44,7 @@ fn main() {
 	all_v_files := os.walk_ext('.', '.v')
 	for v_file in all_v_files {
 		if v_file == './vlib/v/fmt/tests/attrs_keep.vv' {
-			println(term.colorize(term.gray,
-				'>>> SKIPPING deprecations attrs formatting test file ${v_file}'))
+			println(term.colorize(term.gray, '>>> SKIPPING deprecations attrs formatting test file ${v_file}'))
 			continue
 		}
 		if v_file.starts_with('./vlib/v/checker/tests') && v_file.contains('deprec') {
@@ -75,8 +74,7 @@ fn main() {
 			ctx.analyze_line(line, v_file, line_num + 1)
 		}
 	}
-	println('> Summary: there were ${term.colorize(term.bright_yellow, ctx.deprecations.str())} deprecations found, done before ${term.colorize(term.magenta,
-		cut_time.str())}.')
+	println('> Summary: there were ${term.colorize(term.bright_yellow, ctx.deprecations.str())} deprecations found, done before ${term.colorize(term.magenta, cut_time.str())}.')
 	if ctx.deprecations > 0 {
 		exit(1)
 	}

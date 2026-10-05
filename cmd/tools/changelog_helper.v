@@ -88,7 +88,8 @@ fn main() {
 		return
 	}
 	if !os.exists(log_txt) {
-		os.execute(git_log_cmd + ' > ' + log_txt)
+		result := os.exec(os.split_args(git_log_cmd)!)
+		os.write_file(log_txt, result.output)!
 		println('log.txt generated')
 		// println('log.txt generated, remove unnecessary commits from it and run the tool again')
 		// return
@@ -205,7 +206,8 @@ fn (mut app App) process_line(text string) ! {
 	// exit(0)
 	//}
 	if (semicolon_pos < 15
-		&& prefix in ['checker', 'cgen', 'fix', 'orm', 'parser', 'v.parser', 'native', 'ast', 'jsgen', 'v.gen.js', 'fmt', 'vfmt', 'tools', 'examples', 'eval'])
+		&& prefix in ['checker', 'cgen', 'fix', 'orm', 'parser', 'v.parser', 'native', 'ast', 'jsgen',
+			'v.gen.js', 'fmt', 'vfmt', 'tools', 'examples', 'eval'])
 		|| (semicolon_pos < 30 && prefix.contains(', ')) {
 		s = '- ' + text[semicolon_pos + 2..].capitalize()
 	}
@@ -561,7 +563,7 @@ fn is_skip(text string) bool {
 	lower_text := text.to_lower()
 	return lower_text in ['fixes', 'ok'] || lower_text.starts_with('fix #')
 		|| (lower_text.contains('example') && (lower_text.contains('fix')
-		|| lower_text.contains('update'))) || is_xxx(text, skip_strings)
+			|| lower_text.contains('update'))) || is_xxx(text, skip_strings)
 }
 
 const tools_strings = [

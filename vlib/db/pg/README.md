@@ -69,6 +69,9 @@ after following all instructions. Create the `pg` folder yourself if it does not
 │       postgres_ext.h
 │
 └───win64
+    ├───mingw
+    │       libpq.dll.a
+    │
     └───msvc
             libpq.lib
 ```
@@ -96,8 +99,18 @@ Any program that wants to use postgres client functionality require these DLLs f
 - libssl-3-x64.dll
 - libwinpthread-1.dll
 
-If you want to compile with MSVC, you will need to copy `C:/Program Files/PostgreSQL/<version>/bin/libpq.lib`
-into the `@VEXEROOT/thirdparty/pg/win64/msvc` directory.
+If you want to compile with MSVC, copy
+`C:/Program Files/PostgreSQL/<version>/bin/libpq.lib` into the
+`@VEXEROOT/thirdparty/pg/win64/msvc` directory.
+
+GCC and TCC cannot use the MSVC import library. For these compilers, copy a MinGW-compatible
+`libpq.dll.a` into `@VEXEROOT/thirdparty/pg/win64/mingw`. You can install one with the MSYS2
+`mingw-w64-x86_64-postgresql` package, or generate it from `libpq.dll` with `gendef` and `dlltool`:
+
+```powershell
+gendef "C:/Program Files/PostgreSQL/<version>/bin/libpq.dll"
+dlltool -d libpq.def -l libpq.dll.a -D libpq.dll
+```
 
 Navigate to `C:/Program Files/PostgreSQL/<version>/include`. There you will find the files:
 - `libpq-fe.h`
@@ -192,12 +205,12 @@ rows := conn.exec('select 1')!
 
 Queries made with `exec_result()`, `exec_param_many_result()`, or
 `exec_prepared_result()` return a `pg.Result` whose `fields` array contains the
-libpq metadata for each result column:
+libpq metadata for each result column. These methods require a mutable connection:
 
 ```v oksyntax
 import db.pg
 
-fn show_columns(conn &pg.Conn) ! {
+fn show_columns(mut conn pg.Conn) ! {
 	result := conn.exec_result('select 1::int4 as id, 3.14::numeric(10, 2) as amount')!
 	for field in result.fields {
 		println('${field.name}: oid=${field.type_oid}, modifier=${field.type_modifier}')

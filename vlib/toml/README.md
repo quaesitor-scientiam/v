@@ -64,6 +64,60 @@ fn main() {
 }
 ```
 
+## Struct conversion
+
+`toml.decode[T]` decodes TOML text into a struct and `toml.encode[T]` encodes a struct
+as TOML. A field maps to the key of the same name; `@[toml: <name>]` changes the key
+and `@[skip]` ignores the field. Fields missing from the document keep their default
+values. A `from_toml(toml.Any)` or `to_toml() string` method on `T` replaces the
+generic conversion.
+
+Partial tables preserve the existing defaults inside a present optional struct.
+When that optional field is `none`, a table initializes it from the struct's own defaults.
+
+TOML has no struct embedding, so the fields of an embedded struct are read from and
+written to the same table as the fields of the embedding struct. When decoding, a
+table named after the embedded struct (e.g. `[Db]`) is accepted too and takes
+precedence. Embedded `toml.Date`, `toml.Time` and `toml.DateTime` are scalars, stored
+under their type name (e.g. `Date = 2026-09-30`).
+
+Array elements and map values may be scalars, enums, structs, arrays or maps, at any
+nesting depth, so `[]JobTitle`, `map[string][]int` and `[][]map[string]Item` all decode.
+An element that does not fit the element type, such as a number where a struct is
+expected, is skipped. An enum element must be an integer, so a string, boolean,
+float, array or table in an enum position is skipped rather than coerced; a
+plain enum *field* still follows `Any.int()`, which reads a non-numeric value as
+0.
+
+```v
+import toml
+
+struct Db {
+	host string
+	port int
+}
+
+struct Config {
+	Db
+	name   string @[toml: app_name]
+	secret string @[skip]
+}
+
+config := toml.decode[Config]('app_name = "app"\nhost = "localhost"\nport = 5432')!
+assert config.host == 'localhost' // promoted from Db
+assert config.name == 'app'
+encoded := toml.encode(config)
+assert encoded == 'host = "localhost"\nport = 5432\napp_name = "app"'
+assert toml.decode[Config](encoded)! == config
+```
+
+Map fields support string, boolean, and integer keys up to 64 bits. TOML keys are strings;
+integer keys are parsed as decimal numbers with the destination type's range,
+including full-width `i64` and `u64` keys. Invalid or out-of-range keys are skipped,
+as are out-of-range narrow integer values. Boolean keys must be `true` or `false`.
+Other map key types are rejected at compile time. Nested maps retain their own key
+types.
+
 ## Value retrieval
 
 The `toml` module supports easy retrieval of values from

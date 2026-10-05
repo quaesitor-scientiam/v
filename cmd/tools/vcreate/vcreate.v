@@ -286,7 +286,7 @@ indent_style = tab
 fn (c &Create) create_git_repo(dir string) {
 	// Initialize git and add a .gitignore file.
 	if !os.is_dir('${dir}/.git') {
-		res := os.execute('git init ${dir}')
+		res := os.exec(['git', 'init', dir])
 		if res.exit_code != 0 {
 			eprintln('')
 			cerror('unable to initialize a git repository')
@@ -322,8 +322,8 @@ bin/
 *.db
 *.js
 
-# Ignore installed modules through `v install --local`:
-modules/
+# Modules installed with `v install --local` land beside this file, one
+# directory per module. Add them here if they should stay out of the repo.
 '
 	os.write_file(ignore_path, ignore_content) or {}
 }

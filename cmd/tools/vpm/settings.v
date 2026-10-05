@@ -7,11 +7,15 @@ import v.vmod
 
 struct VpmSettings {
 mut:
-	is_help               bool
-	is_once               bool
-	is_verbose            bool
-	is_force              bool
-	is_local              bool
+	is_help    bool
+	is_once    bool
+	is_adopt   bool
+	is_verbose bool
+	is_force   bool
+	is_local   bool
+	// `--locked` refuses to resolve a dependency differently from the `v.mod.lock`
+	// of the project in scope, instead of updating the lockfile.
+	is_locked             bool
 	server_urls           []string
 	mirror_urls           []string
 	vmodules_path         string
@@ -26,6 +30,20 @@ mut:
 	logger &log.Logger
 }
 
+// local_vmodules_path returns the directory `v install --local` installs into:
+// the nearest v.mod folder, or the working directory when there is none. That
+// folder is the module lookup root and a module's import path is its path under
+// it, so a locally installed package has to sit there directly. There is no
+// virtual `modules/` directory left to hide it in.
+fn local_vmodules_path(wrkdir string) string {
+	mut mcache := vmod.get_cache()
+	vmod_file_location := mcache.get_by_folder(wrkdir)
+	if vmod_file_location.vmod_file.len == 0 {
+		return wrkdir
+	}
+	return vmod_file_location.vmod_folder
+}
+
 fn init_settings() VpmSettings {
 	args := os.args[1..]
 	opts := cmdline.only_options(args)
@@ -36,15 +54,8 @@ fn init_settings() VpmSettings {
 	is_local := '-l' in opts || '--local' in opts
 	if is_local {
 		wrkdir := os.getwd()
-		mut mcache := vmod.get_cache()
-		vmod_file_location := mcache.get_by_folder(wrkdir)
-		project_root_dir := if vmod_file_location.vmod_file.len == 0 {
-			wrkdir
-		} else {
-			vmod_file_location.vmod_folder
-		}
-		vmodules_path = os.join_path(project_root_dir, 'modules')
-		verbose_println('init_settings, local installation, wrkdir: ${wrkdir} | project_root_dir: ${project_root_dir} | vmodules_path: ${vmodules_path}')
+		vmodules_path = local_vmodules_path(wrkdir)
+		verbose_println('init_settings, local installation, wrkdir: ${wrkdir} | vmodules_path: ${vmodules_path}')
 	}
 	verbose_println('init_settings, final is_local: ${is_local} | vmodules_path: `${vmodules_path}`')
 
@@ -67,9 +78,11 @@ fn init_settings() VpmSettings {
 	return VpmSettings{
 		is_help:               '-h' in opts || '--help' in opts || 'help' in cmds
 		is_once:               '--once' in opts
+		is_adopt:              '--adopt' in opts
 		is_verbose:            '-v' in opts || '--verbose' in opts
 		is_force:              '-f' in opts || '--force' in opts
 		is_local:              is_local
+		is_locked:             '--locked' in opts
 		server_urls:           get_server_urls_from_args(args)
 		mirror_urls:           get_mirror_urls_from_args(args)
 		vcs:                   if '--hg' in opts { .hg } else { .git }

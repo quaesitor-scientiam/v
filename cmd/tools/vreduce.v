@@ -20,9 +20,9 @@ fn main() {
 	fp.version(version)
 
 	error_msg := fp.string('error_msg', `m`, default_error_msg,
-		'the error message you want to reproduce, default: \'${default_error_msg}\'')
+		"the error message you want to reproduce, default: '${default_error_msg}'")
 	mut command := fp.string('command', `c`, default_command,
-		'the command used to try to reproduce the error, default: \'${default_command}\', will replace PATH with the path of the folder where it is run')
+		"the command used to try to reproduce the error, default: '${default_command}', will replace PATH with the path of the folder where it is run")
 	copy_project := fp.bool('cp', `p`, false,
 		'if used v reduce will copy the whole folder of the project')
 	timeout := fp.int('to', `t`, 0, 'sets a timeout for the command, default=0 : no timeout')
@@ -104,7 +104,7 @@ fn string_reproduces(file_content string, pattern string, command string, file_p
 	os.write_file(file_path, file_content) or { panic(err) }
 	mut output := ''
 	if timeout == 0 {
-		res := os.execute(command)
+		res := os.exec(os.split_args(command) or { panic(err) })
 		output = res.output
 	} else {
 		split := command.split(' ')
@@ -446,7 +446,7 @@ fn reduce_scope(content string, error_msg string, command string, do_fmt bool, f
 }
 
 fn vfmt_file(rpdc_file_path string) {
-	os.execute('${os.quoted_path(@VEXE)} fmt -w ${rpdc_file_path}')
+	os.exec([@VEXE, 'fmt', '-w', rpdc_file_path])
 	final_content := os.read_file(rpdc_file_path) or { panic(err) }
 	show_code_stats(final_content, label: 'Code size after formatting')
 }

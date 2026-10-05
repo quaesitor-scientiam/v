@@ -7,7 +7,6 @@ on:
       - master
     paths:
       - 'vlib/**'
-      - '!vlib/v3/**'
       - 'thirdparty/**'
       - 'cmd/tools/builders/**.v'
       - '**/vab_ci.yml'
@@ -15,7 +14,6 @@ on:
   pull_request:
     paths:
       - 'vlib/**'
-      - '!vlib/v3/**'
       - 'thirdparty/**'
       - 'cmd/tools/builders/**.v'
       - '**/vab_ci.yml'
@@ -24,6 +22,9 @@ on:
 concurrency:
   group: vab-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   vab-compiles-v-examples:
@@ -38,6 +39,8 @@ jobs:
           java-version: 11
 
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Build V
         run: make -j4 && ./v symlink
 
@@ -73,6 +76,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Build V
         run: make -j4 && ./v symlink
 

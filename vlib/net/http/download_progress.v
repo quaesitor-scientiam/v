@@ -4,10 +4,10 @@ module http
 // how download_file_with_progress works, and what output it produces while a file
 // is downloaded.
 pub interface Downloader {
-mut:
 	// Called once, at the start of the streaming download. You can do setup here,
 	// like opening a target file, changing request.stop_copying_limit to a different value,
 	// if you need it.
+mut:
 	on_start(mut request Request, path string) !
 	// Called many times, once a chunk of data is received
 	on_chunk(request &Request, chunk []u8, already_received u64, expected u64) !
@@ -41,9 +41,8 @@ pub mut:
 // Note: the returned response by this function, will have a truncated .body, after the first
 // few KBs, because it does not accumulate all its data in memory, instead relying on the
 // downloaders to save the received data chunk by chunk. You can parametrise this by
-// using `stop_copying_limit:` but you need to pass a number that is big enough to fit
-// at least all headers in the response, otherwise the parsing of the response at the end will
-// fail, despite saving all the data in the file before that. The default is 65536 bytes.
+// using `stop_copying_limit:`, which limits body bytes while preserving all response headers.
+// The default is 65536 bytes; nonpositive limits keep the whole body.
 pub fn download_file_with_progress(url string, path string, params DownloaderParams) !Response {
 	mut d := unsafe { params.downloader }
 	mut config := params.FetchConfig
@@ -51,7 +50,6 @@ pub fn download_file_with_progress(url string, path string, params DownloaderPar
 	config.user_ptr = voidptr(d)
 	config.on_progress_body = download_progres_cb
 	if config.stop_copying_limit == -1 {
-		// leave more than enough space for potential redirect headers
 		config.stop_copying_limit = 65536
 	}
 	mut req := prepare(config)!

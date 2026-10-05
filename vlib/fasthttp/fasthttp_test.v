@@ -20,8 +20,8 @@ fn test_fasthttp_example_compiles() {
 	vroot := os.dir(vexe)
 
 	// Build the fasthttp example
-	build_result := os.system('${os.quoted_path(vexe)} -o ${os.quoted_path(fasthttp_example_exe)} ${os.join_path(vroot,
-		'examples', 'fasthttp')}')
+	build_result := os.system_args([vexe, '-o', fasthttp_example_exe,
+		os.join_path(vroot, 'examples', 'fasthttp')])
 	assert build_result == 0, 'fasthttp example failed to compile'
 	assert os.exists(fasthttp_example_exe), 'fasthttp example binary not found after build'
 }
@@ -115,6 +115,15 @@ fn test_new_server() {
 	}
 
 	assert server.port == 8080
+	assert server.max_request_body_size == default_max_request_body_size
+
+	if _ := new_server(ServerConfig{
+		port:                  8080
+		max_request_body_size: -1
+		handler:               handler
+	}) {
+		assert false, 'negative max_request_body_size should be rejected'
+	}
 }
 
 fn test_server_ipv4_ipv6_binding() {
@@ -199,8 +208,7 @@ fn reusable_takeover_handler(req HttpRequest) !HttpResponse {
 	path := req.buffer[req.path.start..req.path.start + req.path.len].bytestr()
 	if path == '/reusable' {
 		body := 'manual'
-		send_raw_response(req.client_conn_handle,
-			'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${body.len:x}\r\n${body}\r\n0\r\n\r\n')
+		send_raw_response(req.client_conn_handle, 'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n${body.len:x}\r\n${body}\r\n0\r\n\r\n')
 		return HttpResponse{
 			takeover_mode: .reusable
 		}
