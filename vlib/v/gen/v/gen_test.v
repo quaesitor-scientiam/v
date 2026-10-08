@@ -2424,3 +2424,63 @@ fn test_formatter_output_is_a_fixed_point_over_the_fixture_corpus() {
 	}
 	assert checked > 100
 }
+
+fn test_formatter_preserves_and_aligns_inline_struct_access() {
+	source := 'pub struct Foobar {
+	aaaaaa int
+	mut b int
+	pub ccccc int
+	pub mut d int
+	after int
+}
+'
+	expected := 'pub struct Foobar {
+	aaaaaa        int
+	mut     b     int
+	pub     ccccc int
+	pub mut d     int
+	after         int
+}
+'
+	out := vfmt('inline_struct_access', source)
+	assert out == expected, out
+	assert vfmt('inline_struct_access_twice', out) == out
+}
+
+fn test_formatter_keeps_sections_with_inline_struct_access() {
+	source := 'struct Mixed {
+pub:
+	a int
+	mut b int
+	c int
+	pub mut d int
+mut:
+	e int
+}
+'
+	out := vfmt('mixed_inline_struct_access', source)
+	assert out.count('pub:') == 1, out
+	assert out.count('mut:') == 1, out
+	assert out.contains('mut     b'), out
+	assert out.contains('pub mut d'), out
+	assert vfmt('mixed_inline_struct_access_twice', out) == out
+}
+
+fn test_formatter_keeps_inline_access_before_volatile() {
+	out := vfmt('inline_access_volatile', 'struct State {
+	pub volatile value int
+}
+')
+	assert out.contains('pub     volatile value int'), out
+	assert vfmt('inline_access_volatile_twice', out) == out
+}
+
+fn test_formatter_keeps_comptime_string_expression_sources() {
+	source := "fn main() {\n path := 'GET /users'.all_after(' ')\n \$for segment in path.trim_left('/').split('/') { println(segment) }\n \$for word in 'alpha beta'.fields() { println(word) }\n \$for part in 'a,b;c'.split_any(',;') { println(part) }\n \$if path[1..].starts_with('users') { println(path) }\n}\n"
+	out := vfmt('comptime_string_sources', source)
+	assert out.contains("\$for segment in path.trim_left('/').split('/') {")
+	assert out.contains("\$for word in 'alpha beta'.fields() {")
+	assert out.contains("\$for part in 'a,b;c'.split_any(',;') {")
+	assert out.contains("path[1..].starts_with('users')"), out
+	assert vfmt('comptime_string_sources_twice', out) == out
+}
