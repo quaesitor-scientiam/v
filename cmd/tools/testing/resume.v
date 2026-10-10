@@ -76,6 +76,14 @@ fn (r TestResume) save() ! {
 	}
 	tmp_path := os.join_path(tmp_dir, 'progress')
 	os.write_file(tmp_path, r.contents)!
+	// Windows rename does not replace an existing file, and an edited test
+	// rewrites its record at the same path. Dropping the old record first can
+	// only leave the test pending again, which is harmless.
+	$if windows {
+		if os.exists(r.path) {
+			os.rm(r.path)!
+		}
+	}
 	os.rename(tmp_path, r.path)!
 }
 

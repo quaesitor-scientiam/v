@@ -2553,6 +2553,7 @@ V has only one looping keyword: `for`, with several forms.
 
 This is the most common form. You can use it with an array, map or
 numeric range.
+The opening `{` of the loop body may appear on the next line after the iterable or range.
 
 ##### Array `for`
 
@@ -7181,6 +7182,9 @@ An overview of the module must be placed in the first comment right after the mo
 
 To generate documentation use vdoc, for example `v doc net.http`.
 
+The ANSI and HTML formats highlight enum values, attributes, map types, compile-time keywords,
+and string interpolation format specifications.
+
 ### Newlines in Documentation Comments
 
 Comments spanning multiple lines are merged together using spaces, unless
@@ -8639,6 +8643,8 @@ The whole content of the file is embedded only in `-prod` builds (and in portabl
 the file is loaded from that path *the first time* your program calls
 `embedded_file.data()` at runtime. This keeps rebuilds cheap and lets you change
 the file in an external editor without recompiling your program.
+`embedded_file.len` is the size of the file when the program was compiled, until
+the file is loaded. After that it is the size of what was loaded.
 
 Because the stored path points to the machine the program was built on, a
 development build panics when it runs where that file does not exist, for example

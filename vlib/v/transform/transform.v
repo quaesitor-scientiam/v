@@ -223,6 +223,7 @@ mut:
 	building_v                          bool
 	var_types                           []VarTypeBinding
 	comptime_scalar_locals              map[string]ComptimeStringScalar
+	cur_stmt_list                       []flat.NodeId // the statement list being transformed
 	var_type_indices                    map[string]int
 	var_type_cache                      &VarTypeIndexCache = unsafe { nil }
 	refined_node_types                  map[int]string
@@ -504,6 +505,18 @@ mut:
 	// used-set (holding `seed.time_seed_array`) cannot filter, which used to
 	// re-transform hundreds of already-transformed bodies every build.
 	transformed_fns []bool
+	// lowered_fn_bodies[i] is set, while a tree that went through the transform
+	// stage is monomorphized, when the body of the fn_decl at node id i has no
+	// lowering left: the used set named the function when monomorphization
+	// started, so the transform stage settled its body, or an earlier round of the
+	// late-used-fn-bodies pass lowered it. That pass takes the first insertion of
+	// a used-set spelling for a function that just became reachable, while a
+	// function goes by several spellings and markused records only some of them
+	// (`Tag.add_frame`, not `Tag__add_frame`): a call from a specialization got an
+	// already lowered body lowered again. It is not transformed_fns, which
+	// lower_remaining_matches_in_used_fns skips: that walk still has matches to
+	// lower in the bodies of the transform stage.
+	lowered_fn_bodies []bool
 	// Shared-base (clone-free) parallel transform: all threads operate on views
 	// of the master arrays, appending into pre-partitioned capacity regions.
 	// While base_write_intercept is set, in-place writes to base-range node
@@ -1728,7 +1741,7 @@ pub fn monomorphize_with_used_checked_config(mut a flat.FlatAst, tc &types.TypeC
 // state in `stage_scope` while promoting escaping AST payloads directly to its
 // parent arena.
 pub fn monomorphize_with_used_checked_config_scoped(mut a flat.FlatAst, tc &types.TypeChecker, used_fns map[string]bool, parallel bool, stage_scope voidptr) (map[string]bool, []string) {
-	result, errors, _ := monomorphize_with_used_checked_config_scoped_cached(mut a, tc, used_fns, parallel, stage_scope, []MonomorphCacheSpec{})
+	result, errors, _ := monomorphize_with_used_checked_config_scoped_cached(mut a, tc, used_fns, parallel, stage_scope, []MonomorphCacheSpec{}, false)
 	return result, errors
 }
 
@@ -1736,7 +1749,12 @@ pub fn monomorphize_with_used_checked_config_scoped(mut a flat.FlatAst, tc &type
 // signatures from `cached_specs` and returns the complete specialization set.
 // A restored signature rewrites current program calls normally, while its
 // unchanged dependency body can remain in the persistent compiled prefix.
-pub fn monomorphize_with_used_checked_config_scoped_cached(mut a flat.FlatAst, tc &types.TypeChecker, used_fns map[string]bool, parallel bool, stage_scope voidptr, cached_specs []MonomorphCacheSpec) (map[string]bool, []string, []MonomorphCacheSpec) {
+// `after_transform` tells that the tree went through the transform stage, which
+// settled the body of every function that `used_fns` names: it lowered the
+// body, or, in an incremental rebuild, left it to the cached build. Only the
+// functions that a specialization makes reachable are then lowered here. A
+// check monomorphizes the tree as it was parsed and passes false.
+pub fn monomorphize_with_used_checked_config_scoped_cached(mut a flat.FlatAst, tc &types.TypeChecker, used_fns map[string]bool, parallel bool, stage_scope voidptr, cached_specs []MonomorphCacheSpec, after_transform bool) (map[string]bool, []string, []MonomorphCacheSpec) {
 	debug_started := time.ticks()
 	mut t := new_transformer(mut a, tc, used_fns)
 	// Checker fixtures fully re-check every specialized body
@@ -1751,6 +1769,9 @@ pub fn monomorphize_with_used_checked_config_scoped_cached(mut a flat.FlatAst, t
 		t.scope_parallel_workers = true
 	}
 	t.prepare()
+	if after_transform {
+		t.mark_used_fn_bodies_lowered()
+	}
 	// This fresh transformer does not retain the preceding source-box index.
 	// Methods first reached by comptime dispatch can still contain source-level
 	// conversions, such as `return Foo{}` from an `IFoo` getter. Collect those
@@ -1834,6 +1855,21 @@ pub fn monomorphize_with_used_checked_config_scoped_cached(mut a flat.FlatAst, t
 	t.report_alloc_warnings()
 	t.report_unevaluated_comptime_ifs()
 	return t.used_fns, t.monomorph_errors, final_specs
+}
+
+// mark_used_fn_bodies_lowered records in lowered_fn_bodies the functions whose
+// bodies the transform stage settled before monomorphization: it transforms a
+// fn_decl exactly when the used set names it (should_transform_fn) and it has
+// no unresolved generics.
+fn (mut t Transformer) mark_used_fn_bodies_lowered() {
+	t.lowered_fn_bodies = []bool{len: t.a.nodes.len}
+	for cand in t.collect_late_scan_candidates(t.a.nodes.len) {
+		node := t.a.nodes[cand.idx]
+		if t.should_transform_fn_in_module(node, cand.module)
+			&& !t.fn_decl_has_unresolved_generics(node, cand.module) {
+			t.lowered_fn_bodies[cand.idx] = true
+		}
+	}
 }
 
 fn (mut t Transformer) release_monomorph_worker_scopes() {
@@ -4530,7 +4566,15 @@ fn (t &Transformer) fork_program_view(ast &flat.FlatAst, wtc &types.TypeChecker,
 		shared_local_decl_names:             t.shared_local_decl_names
 		has_shared_decls:                    t.has_shared_decls
 		shared_field_names:                  t.shared_field_names
-		const_array_fixed_storage_cache:     t.const_array_fixed_storage_cache
+		const_array_fixed_storage_ready:     t.const_array_fixed_storage_ready
+		// A populated cache is only read, so workers can share it. A lazy cache
+		// memoizes lookup misses: sharing its buckets would let a worker insert
+		// keys owned by its scratch arena into storage that outlives the worker.
+		const_array_fixed_storage_cache:     if t.const_array_fixed_storage_ready {
+			t.const_array_fixed_storage_cache
+		} else {
+			map[string]i8{}
+		}
 		enum_types:                          t.enum_types
 		enum_backing_types:                  t.enum_backing_types
 		runtime_type_indexes:                t.runtime_type_indexes
@@ -5698,6 +5742,7 @@ fn (mut t Transformer) transform_late_used_fn_bodies(names []string, names_start
 		} else if kind_id == 73 {
 			scan_module = node.value
 		} else if kind_id == 61 && !(i < t.transformed_fns.len && t.transformed_fns[i])
+			&& !(i < t.lowered_fn_bodies.len && t.lowered_fn_bodies[i])
 			&& !t.fn_decl_has_unresolved_generics(node, scan_module) {
 			candidates << LateFnCandidate{
 				idx:    i
@@ -5820,6 +5865,9 @@ fn (mut t Transformer) transform_late_candidate(ci int, mut candidates []LateFnC
 	log_start := t.used_fns_log.len
 	node_count_before := t.a.nodes.len
 	t.transform_fn_body(idx)
+	if idx < t.lowered_fn_bodies.len {
+		t.lowered_fn_bodies[idx] = true
+	}
 	for call_name in t.generated_fn_body_call_names(flat.NodeId(idx)) {
 		t.enqueue_late_used_call_name(call_name, log_start, mut late, mut pending, mut queued)
 	}
@@ -6571,7 +6619,10 @@ fn (mut t Transformer) transform_string_interp_part(child_id flat.NodeId) flat.N
 		&& t.string_interp_needs_value_read(expr_node.value, typ) {
 		// Reading a local moved to the heap already dereferences its storage, while
 		// `typ` can still be the `&Alias` of that storage: read the value only once.
-		if !t.is_value_read_of(transformed, expr_node.value) {
+		// A `mut n &T` parameter is a slot for the pointer, so its `*n` is still `&T`.
+		is_mut_pointer_param := t.mut_param_values[expr_node.value]
+			&& t.var_type(expr_node.value).starts_with('&')
+		if is_mut_pointer_param || !t.is_value_read_of(transformed, expr_node.value) {
 			transformed = t.make_prefix(.mul, transformed)
 		}
 		typ = typ[1..]
@@ -11131,7 +11182,12 @@ fn (t &Transformer) fn_return_type_for_name(name string) ?string {
 pub fn (mut t Transformer) transform_stmts(ids []flat.NodeId) []flat.NodeId {
 	mut result := []flat.NodeId{cap: ids.len}
 	saved_comptime_locals := t.comptime_scalar_locals.clone()
-	defer { t.comptime_scalar_locals = saved_comptime_locals }
+	outer_stmt_list := t.cur_stmt_list
+	t.cur_stmt_list = ids
+	defer {
+		t.comptime_scalar_locals = saved_comptime_locals
+		t.cur_stmt_list = outer_stmt_list
+	}
 	had_base_smartcasts := t.smartcast_stack.len > 0
 	base_smartcasts := if had_base_smartcasts {
 		t.smartcast_stack.clone()
@@ -13355,7 +13411,10 @@ fn (mut t Transformer) const_array_literal_requires_fixed_storage(key string) bo
 		return cached > 0
 	}
 	result := t.const_array_literal_requires_fixed_storage_uncached(key)
-	t.const_array_fixed_storage_cache[key] = if result { i8(1) } else { i8(-1) }
+	// A populated cache can be shared with running workers; never grow it.
+	if !t.const_array_fixed_storage_ready {
+		t.const_array_fixed_storage_cache[key] = if result { i8(1) } else { i8(-1) }
+	}
 	return result
 }
 
@@ -19663,7 +19722,7 @@ fn (mut t Transformer) comptime_type_matches(actual string, expected string) ?bo
 	if !local_name.contains('.') {
 		var_typ := t.var_type(local_name)
 		if var_typ.len > 0 {
-			clean_actual = if t.mut_param_values[local_name] {
+			clean_actual = if t.mut_param_values[local_name] && !t.pointer_value_rvalues[local_name] {
 				var_typ.trim_string_left('&')
 			} else {
 				var_typ
@@ -19932,7 +19991,7 @@ fn (t &Transformer) comptime_condition_actual_type(raw string) string {
 	}
 	raw_var_type := t.raw_var_type(clean)
 	if raw_var_type.len > 0 {
-		clean = if t.mut_param_values[clean] {
+		clean = if t.mut_param_values[clean] && !t.pointer_value_rvalues[clean] {
 			raw_var_type.trim_string_left('&')
 		} else {
 			raw_var_type
