@@ -2745,6 +2745,19 @@ pub fn (mut tc TypeChecker) rebuild_scoped_transform_signature_maps() {
 	tc.transform_signature_maps_changed = false
 }
 
+// promote_scoped_declaration_visibility moves declaration ownership into the
+// current arena before the scoped transform metadata is released.
+pub fn (mut tc TypeChecker) promote_scoped_declaration_visibility() {
+	mut declarations := map[string]DeclarationVisibility{}
+	for name, visibility in tc.declaration_visibility {
+		declarations[name.clone()] = DeclarationVisibility{
+			...visibility
+			module_name: visibility.module_name.clone()
+		}
+	}
+	tc.declaration_visibility = declarations.move()
+}
+
 // begin_sparse_transform_node_caches keeps source-node entries in their dense
 // checked arrays and records transform-created node metadata sparsely.
 pub fn (mut tc TypeChecker) begin_sparse_transform_node_caches(base_nodes int) {
@@ -5589,7 +5602,13 @@ fn (tc &TypeChecker) global_type_for_selector(node flat.Node) ?Type {
 	if base_node.kind != .ident {
 		return none
 	}
-	resolved := tc.resolve_import_alias(base_node.value) or { base_node.value }
+	resolved := tc.resolve_import_alias(base_node.value) or {
+		if base_node.value == tc.cur_module.all_after_last('.') {
+			tc.cur_module
+		} else {
+			base_node.value
+		}
+	}
 	qname := '${resolved}.${node.value}'
 	if qname in tc.global_names {
 		return tc.file_scope.lookup(qname)

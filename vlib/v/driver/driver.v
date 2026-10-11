@@ -2315,11 +2315,15 @@ fn input_owns_builtin_bundle_module(input_file string, vroot string) bool {
 }
 
 fn input_is_legacy_diagnostic_fixture(input_file string) bool {
-	if !input_file.ends_with('.vv') {
+	resolved := os.real_path(input_file)
+	normalized := resolved.replace('\\', '/')
+	if !['/vlib/v/checker/tests/', '/vlib/v/parser/tests/', '/vlib/v/scanner/tests/'].any(normalized.contains(it)) {
 		return false
 	}
-	normalized := os.real_path(input_file).replace('\\', '/')
-	if !['/vlib/v/checker/tests/', '/vlib/v/parser/tests/', '/vlib/v/scanner/tests/'].any(normalized.contains(it)) {
+	if os.is_dir(input_file) {
+		return os.is_file(resolved + '.out')
+	}
+	if !input_file.ends_with('.vv') {
 		return false
 	}
 	base := input_file.all_before_last('.vv')
@@ -7025,6 +7029,13 @@ fn clone_string_list_map(values map[string][]string) map[string][]string {
 fn promote_scoped_type_metadata(mut tc types.TypeChecker) {
 	// Transform and specialization can grow these maps inside a disposable arena,
 	// so move both their storage and string payloads before releasing that arena.
+	tc.fn_ret_type_texts = clone_string_string_map(tc.fn_ret_type_texts)
+	tc.fn_param_type_texts = clone_string_list_map(tc.fn_param_type_texts)
+	tc.fn_generic_params = clone_string_list_map(tc.fn_generic_params)
+	tc.mut_receiver_methods = clone_string_bool_map(tc.mut_receiver_methods)
+	tc.c_variadic_fns = clone_string_bool_map(tc.c_variadic_fns)
+	tc.fn_implicit_veb_ctx = clone_string_bool_map(tc.fn_implicit_veb_ctx)
+	tc.promote_scoped_declaration_visibility()
 	tc.fn_type_files = clone_string_string_map(tc.fn_type_files)
 	tc.fn_type_modules = clone_string_string_map(tc.fn_type_modules)
 	tc.structs = clone_struct_field_map(tc.structs)
@@ -10184,8 +10195,8 @@ pub fn run(args []string) {
 	}
 	if !is_checker_fixture && input_is_legacy_diagnostic_fixture(input_file) {
 		// v/compiler_errors_test.v predates `-checker-fixture` and invokes every
-		// adjacent `.vv`/`.out` fixture directly. Keep those subprocesses on the
-		// same stable diagnostic path as the V3 fixture runner.
+		// adjacent `.vv`/`.out` or module-directory fixture directly. Keep those
+		// subprocesses on the same stable diagnostic path as the V3 fixture runner.
 		is_checker_fixture = true
 		no_cache = true
 	}
@@ -12588,7 +12599,10 @@ pub fn run(args []string) {
 			program_used_fns = clone_string_bool_map(used_fns)
 		}
 		if cache_state.manager.enabled && !generic_cache_hit {
-			if building_v && current_parallel_transform {
+			// Cached library bodies can introduce the first generic call even when
+			// the compiler-build entry point has none. Detect that before deciding
+			// whether the specialization pass is needed.
+			if building_v && current_parallel_transform && uses_generics {
 				used_fns = markused.mark_used_for_cache_without_generic_detection(a, markused_tc, test_files, cache_state.source_body_modules)
 			} else {
 				mut cache_uses_generics := false
@@ -13485,6 +13499,15 @@ pub fn run(args []string) {
 		}
 	} else {
 		// C backend (default)
+		if msg := cgen.manual_stdlib_c_headers_error() {
+			if cgen.uses_manual_stdlib_c_headers(a, &pre_tc, prefs, user_c_flags) {
+				// The message is the whole diagnosis. Clear the V3 failure marker first, or the
+				// parent process replays this compile and prints the message a second time.
+				clear_macos_v3_compiler_error_fallback(macos_v3_fallback_file)
+				eprintln(msg)
+				exit(1)
+			}
+		}
 		if effective_c_compiler == 'msvc' && !c_only && !output_cross_c {
 			if msg := msvc_inline_asm_error(a, used_fns) {
 				eprintln(msg)
