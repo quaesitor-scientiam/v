@@ -121,6 +121,17 @@ fn main() {
 		return
 	}
 	command_index, command := find_command(args)
+	// Tool arguments belong to the tool, including a completion query for the removed flag.
+	compiler_args := if command in external_commands || command == 'help' {
+		args[..command_index]
+	} else {
+		args
+	}
+	// Reject the removed flag before compatibility fallback or tool dispatch can accept it.
+	if compiler_option_requested(compiler_args, '-usecache') {
+		eprintln('unknown option `-usecache`; caching is enabled by default, use `-nocache` to disable it')
+		exit(1)
+	}
 	if command in ['version', '-version', '--version'] {
 		println('V ${v_version} ${@VCURRENTHASH}')
 		return
@@ -431,9 +442,9 @@ fn export_vtest_build_environment(vroot string, prefix_args []string) {
 }
 
 fn external_tool_runtime_args(command string, prefix_args []string, command_args []string) []string {
-	// Retry consumes the same argv as its standalone executable. The launcher owns
+	// These tools consume the same argv as their standalone executable. The launcher owns
 	// the subcommand name, so remove it here without guessing from user arguments.
-	if command == 'retry' {
+	if command in ['diff', 'download', 'repeat', 'retry', 'time', 'timeout'] {
 		return command_args[1..].clone()
 	}
 	mut tool_args := []string{}
@@ -780,7 +791,7 @@ fn v1_fallback_args(args []string) []string {
 			continue
 		}
 		if arg in ['-macos-v3-internal-quiet', '-macos-v3-compat-c99',
-			'-v3-internal-parser-diagnostics-printed']
+			'-v3-internal-parser-diagnostics-printed', '-v3-internal-force-cache-source']
 			|| arg.starts_with('-v3-internal-implicit-tcc-warning=') {
 			continue
 		}
