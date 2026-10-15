@@ -132,7 +132,7 @@ fn (tc &TypeChecker) vls_type_details(typ Type) []VlsDetail {
 		if t is Pointer {
 			t = t.base_type
 		} else if t is Alias {
-			alias_name := t.name
+			alias_name := t.name()
 			t = t.base_type
 			tc.vls_method_details(alias_name, mut details, mut seen)
 		} else {

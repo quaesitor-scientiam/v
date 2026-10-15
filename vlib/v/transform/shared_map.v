@@ -79,7 +79,7 @@ fn (mut t Transformer) shared_map_rlock_expr(id flat.NodeId, base_id flat.NodeId
 	return t.a.add_node(flat.Node{
 		kind:           .lock_expr
 		value:          'rlock'
-		typ:            typ
+		typ:            flat.source_type_id(typ)
 		children_start: start
 		children_count: 2
 		pos:            t.a.nodes[int(id)].pos
@@ -411,7 +411,7 @@ fn (t &Transformer) shared_map_base(id flat.NodeId) ?flat.NodeId {
 		if node.value.len == 0 {
 			return none
 		}
-		mut typ := t.raw_var_type(node.value)
+		mut typ := flat.source_type_name(t.raw_var_type(node.value))
 		if typ.len == 0 {
 			typ = t.current_module_global_type(node.value) or { '' }
 		}
@@ -435,7 +435,7 @@ fn (t &Transformer) shared_map_base(id flat.NodeId) ?flat.NodeId {
 		typ := t.raw_selector_field_type(id) or {
 			mut base_type := t.original_expr_type(base_id)
 			if base_type.len == 0 {
-				base_type = t.node_type(base_id)
+				base_type = flat.source_type_name(t.node_type(base_id))
 			}
 			t.promoted_field_raw_type(base_type.trim_left('&'), node.value, 0) or { return none }
 		}
@@ -454,11 +454,11 @@ fn (t &Transformer) promoted_field_raw_type(struct_type string, field_name strin
 	}
 	info := t.lookup_struct_info(struct_type) or { return none }
 	if field := info.field(field_name) {
-		return if field.raw_typ.len > 0 { field.raw_typ } else { field.typ }
+		return if field.raw_typ_text().len > 0 { field.raw_typ_text() } else { field.typ_text() }
 	}
 	for field in info.fields {
 		if field.is_embedded {
-			if typ := t.promoted_field_raw_type(field.typ.trim_left('&'), field_name, depth + 1) {
+			if typ := t.promoted_field_raw_type(field.typ_text().trim_left('&'), field_name, depth + 1) {
 				return typ
 			}
 		}
@@ -467,7 +467,7 @@ fn (t &Transformer) promoted_field_raw_type(struct_type string, field_name strin
 }
 
 fn (t &Transformer) is_shared_map_type_text(typ string) bool {
-	mut clean := typ.trim_space()
+	mut clean := trimmed_transform_text(typ)
 	if !clean.starts_with('shared ') {
 		return false
 	}
@@ -475,5 +475,5 @@ fn (t &Transformer) is_shared_map_type_text(typ string) bool {
 	for clean.starts_with('&') {
 		clean = clean[1..]
 	}
-	return clean.starts_with('map[') || t.normalize_type_alias(clean).starts_with('map[')
+	return clean.starts_with('map[') || flat.source_type_name(t.normalize_type_alias(flat.source_type_id(clean))).starts_with('map[')
 }

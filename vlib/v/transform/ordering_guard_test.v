@@ -22,7 +22,7 @@ fn build_namespace_call(mut t Transformer, base_name string, base_type string, m
 		kind:           .if_expr
 		children_start: branch_start
 		children_count: 3
-		typ:            'int'
+		typ:            flat.source_type_id('int')
 	})
 
 	call_start := t.a.children.len
@@ -87,9 +87,9 @@ fn test_runtime_callee_base_is_still_spilled_into_an_ordering_temp() {
 	mut tc := types.TypeChecker.new(&a)
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
 	t.cur_module = 'main'
-	t.set_var_type('holder', 'Holder')
+	t.set_var_type('holder', flat.source_type_id('Holder'))
 	t.structs['Holder'] = StructInfo{
-		name: 'Holder'
+		name: flat.source_type_id('Holder')
 	}
 
 	call, node := build_namespace_call(mut t, 'holder', 'Holder', 'render')
@@ -104,9 +104,9 @@ fn test_untyped_but_bound_receiver_is_still_spilled_into_an_ordering_temp() {
 	mut tc := types.TypeChecker.new(&a)
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
 	t.cur_module = 'main'
-	t.set_var_type('cloned', 'Holder')
+	t.set_var_type('cloned', flat.source_type_id('Holder'))
 	t.structs['Holder'] = StructInfo{
-		name: 'Holder'
+		name: flat.source_type_id('Holder')
 	}
 
 	call, node := build_namespace_call(mut t, 'cloned', 'unknown', 'render')
@@ -134,7 +134,7 @@ fn test_callee_base_runtime_value_classification() {
 
 	// A runtime receiver whose type the checker lost — the case a generic clone produces. Its
 	// binding survives, so it must stay snapshotted.
-	t.set_var_type('cloned', 'Holder')
+	t.set_var_type('cloned', flat.source_type_id('Holder'))
 	cloned_base := t.a.add_val(.ident, 'cloned')
 	t.set_node_typ(int(cloned_base), 'unknown')
 	assert !t.callee_base_is_not_a_runtime_value(cloned_base)

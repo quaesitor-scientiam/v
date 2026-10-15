@@ -28,7 +28,7 @@ fn (mut t Transformer) named_variant_binding_decls(match_expr_id flat.NodeId, br
 	}
 	subject := t.expr_key(match_expr_id)
 	sc := t.match_type_smartcast_context(match_expr_id, cond_id) or { return []flat.NodeId{} }
-	payload_type := t.tc.named_variant_payload_type(sc.variant_name) or {
+	payload_type := t.tc.named_variant_payload_type(sc.variant_name_text()) or {
 		return []flat.NodeId{}
 	}
 	if subject.len == 0 {
@@ -36,7 +36,7 @@ fn (mut t Transformer) named_variant_binding_decls(match_expr_id flat.NodeId, br
 	}
 	payload_name := t.tc.type_name(payload_type)
 	base := t.make_ident(subject)
-	t.set_node_typ(int(base), sc.variant_name)
+	t.set_node_typ(int(base), sc.variant_name_text())
 	payload := t.make_selector_op(base, flat.named_variant_payload_field, payload_name, .dot)
 	return [t.make_decl_assign_typed(binding, payload, payload_name)]
 }
@@ -63,7 +63,7 @@ fn (mut t Transformer) named_variant_str(expr flat.NodeId, variant string, is_re
 	}
 	// Keep the payload's variant on the stack, as ordinary struct formatting
 	// does, so an array of the enclosing sum is not mistaken for a direct cycle.
-	t.stringify_stack << variant
+	t.stringify_stack << flat.source_type_id(variant)
 	defer {
 		t.stringify_stack.delete_last()
 	}
@@ -75,7 +75,7 @@ fn (mut t Transformer) named_variant_str(expr flat.NodeId, variant string, is_re
 	}
 	payload := t.make_selector_op(value, flat.named_variant_payload_field, payload_name, .dot)
 	mut text := t.wrap_string_conversion(payload, payload_name)
-	clean_payload := t.normalize_type_alias(payload_name)
+	clean_payload := flat.source_type_name(t.normalize_type_alias(flat.source_type_id(payload_name)))
 	if clean_payload == 'string' {
 		text = t.string_plus(t.string_plus(t.make_string_literal("'"), text), t.make_string_literal("'"))
 	} else if clean_payload == 'rune' {

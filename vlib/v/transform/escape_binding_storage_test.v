@@ -10,8 +10,8 @@ fn test_inner_pointer_declarations_shadow_and_restore_outer_storage_markers() {
 		mut tc := types.TypeChecker.new(&a)
 		pointer_type := types.Type(types.Pointer{ base_type: types.Type(types.ArrayFixed{ elem_type: types.Type(types.int_), len: 2 }) })
 		mut t := new_transformer(mut a, &tc, map[string]bool{})
-		t.set_var_type('pointer', '&[2]int')
-		t.set_var_type('values', '&[2]int')
+		t.set_var_type('pointer', flat.source_type_id('&[2]int'))
+		t.set_var_type('values', flat.source_type_id('&[2]int'))
 		t.heaped_amp_locals['values'] = true
 		t.pointer_value_lvalues['values'] = true
 		t.pointer_value_rvalues['values'] = true
@@ -38,7 +38,7 @@ fn test_inner_pointer_declarations_shadow_and_restore_outer_storage_markers() {
 		assert t.heaped_amp_locals['values']
 		assert t.pointer_value_lvalues['values']
 		assert t.pointer_value_rvalues['values']
-		assert t.var_type('values') == '&[2]int'
+		assert flat.source_type_name(t.var_type('values')) == '&[2]int'
 	}
 }
 
@@ -54,7 +54,7 @@ fn test_single_shadow_declaration_reads_incoming_heap_storage_before_rebinding()
 		t.a.children << [t.make_ident(target), value]
 		decl := t.a.add_node(flat.Node{
 			kind:           .decl_assign
-			typ:            'int'
+			typ:            flat.source_type_id('int')
 			children_start: start
 			children_count: 2
 			pos:            token.new_span(1, 1, 10)
@@ -84,7 +84,7 @@ fn test_multi_declarations_clear_only_lhs_markers_after_reading_rhs_bindings() {
 		mut tc := types.TypeChecker.new(&a)
 		fixed_type := types.Type(types.ArrayFixed{ elem_type: types.Type(types.int_), len: 2 })
 		mut t := new_transformer(mut a, &tc, map[string]bool{})
-		t.set_var_type('values', '&[2]int')
+		t.set_var_type('values', flat.source_type_id('&[2]int'))
 		t.heaped_amp_locals['values'] = true
 		t.pointer_value_lvalues['values'] = true
 		t.pointer_value_rvalues['values'] = true
@@ -122,7 +122,7 @@ fn test_heap_moved_source_declaration_keeps_its_mutability() {
 		t.a.children << [lhs, t.make_int_literal(1)]
 		decl := t.a.add_node(flat.Node{
 			kind:           .decl_assign
-			typ:            'int'
+			typ:            flat.source_type_id('int')
 			children_start: start
 			children_count: 2
 			pos:            token.new_span(1, 1, 10)

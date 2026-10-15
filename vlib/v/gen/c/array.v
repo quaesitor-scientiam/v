@@ -110,13 +110,13 @@ fn (g &FlatGen) fixed_array_type_from_alias_text(type_name string) ?types.ArrayF
 		if cur.len == 0 {
 			return none
 		}
-		if fixed := array_fixed_type(g.tc.parse_type(cur)) {
+		if fixed := array_fixed_type(g.tc.parse_type(flat.source_type_id(cur))) {
 			return fixed
 		}
-		mut next := g.tc.type_aliases[cur] or { '' }
+		mut next := g.tc.type_aliases.get(cur) or { '' }
 		if next.len == 0 {
 			qname := g.tc.qualify_name(cur)
-			next = g.tc.type_aliases[qname] or { '' }
+			next = g.tc.type_aliases.get(qname) or { '' }
 		}
 		if next.len == 0 || next == cur {
 			return none
@@ -128,7 +128,7 @@ fn (g &FlatGen) fixed_array_type_from_alias_text(type_name string) ?types.ArrayF
 
 fn runtime_array_struct_type(t types.Type) bool {
 	if t is types.Struct {
-		return t.name == 'array' || t.name == 'Array'
+		return t.name() == 'array' || t.name() == 'Array'
 	}
 	if t is types.Alias {
 		return runtime_array_struct_type(t.base_type)
@@ -405,7 +405,7 @@ fn (mut g FlatGen) gen_fixed_array_data_arg(id flat.NodeId, arr types.ArrayFixed
 			return
 		}
 	}
-	annotated_is_fixed := node.typ.len > 0 && array_fixed_type(g.parse_node_type(&node)) != none
+	annotated_is_fixed := node.typ_text().len > 0 && array_fixed_type(g.parse_node_type(&node)) != none
 	if !annotated_is_fixed
 		&& fixed_array_option_payload_type(types.unwrap_pointer(g.usable_expr_type(id))) != none {
 		g.gen_expr(id)
@@ -466,7 +466,7 @@ fn (mut g FlatGen) gen_new_array_fixed_data_arg(call flat.Node, arg_start int, a
 	if sizeof_node.kind != .sizeof_expr || sizeof_node.value.len == 0 {
 		return false
 	}
-	elem_type := g.tc.parse_type(sizeof_node.value)
+	elem_type := g.tc.parse_type(flat.source_type_id(sizeof_node.value))
 	g.gen_fixed_array_data_arg(arg_id, types.ArrayFixed{
 		elem_type: elem_type
 	})
@@ -706,6 +706,27 @@ fn (mut g FlatGen) gen_slice_expr(node flat.Node, base_id flat.NodeId, base_type
 	}
 }
 
+// array_accessors_call_builtin reports whether `first()`/`last()` are emitted as calls of
+// the builtin methods, whose guard reports an empty array under the name of the method.
+// A `-no-bounds-checking` build keeps the index that `array.get` does not check there.
+fn (g &FlatGen) array_accessors_call_builtin() bool {
+	return 'no_bounds_checking' !in g.compile_defines
+}
+
+// array_accessor_index_method returns the method, `first` or `last`, that an index marked
+// by the transformer stands for (an lvalue use, such as `arr.last().field = x`) when the
+// index is emitted as a call of that method, and '' for any other index.
+fn (g &FlatGen) array_accessor_index_method(node &flat.Node) string {
+	if node.payload == 0 || !g.array_accessors_call_builtin() {
+		return ''
+	}
+	params := node.generic_params()
+	if params.len == 2 && params[0] == array_accessor_index_marker {
+		return params[1]
+	}
+	return ''
+}
+
 // gen_array_method_call emits array method call output for c.
 fn (mut g FlatGen) gen_array_method_call(node flat.Node, fn_node &flat.Node, arr types.Array) {
 	base_id := g.a.child(fn_node, 0)
@@ -743,7 +764,7 @@ fn (mut g FlatGen) gen_array_method_call(node flat.Node, fn_node &flat.Node, arr
 			g.write(')')
 		}
 		'last' {
-			if g.expr_is_stable_for_reuse(base_id) {
+			if !g.array_accessors_call_builtin() && g.expr_is_stable_for_reuse(base_id) {
 				g.write('*(${c_elem}*)array_get(')
 				if is_ptr {
 					g.write('*')
@@ -753,7 +774,8 @@ fn (mut g FlatGen) gen_array_method_call(node flat.Node, fn_node &flat.Node, arr
 				g.gen_expr(base_id)
 				g.write('${dot}len - 1)')
 			} else {
-				// The index above names the receiver twice, which would evaluate
+				// `array.last` reports an empty array under its own name. The index
+				// above also names the receiver twice, which would evaluate
 				// `make().last()` twice.
 				g.write('*(${c_elem}*)array__last(')
 				if is_ptr {
@@ -764,12 +786,21 @@ fn (mut g FlatGen) gen_array_method_call(node flat.Node, fn_node &flat.Node, arr
 			}
 		}
 		'first' {
-			g.write('*(${c_elem}*)array_get(')
-			if is_ptr {
-				g.write('*')
+			if g.array_accessors_call_builtin() {
+				g.write('*(${c_elem}*)array__first(')
+				if is_ptr {
+					g.write('*')
+				}
+				g.gen_expr(base_id)
+				g.write(')')
+			} else {
+				g.write('*(${c_elem}*)array_get(')
+				if is_ptr {
+					g.write('*')
+				}
+				g.gen_expr(base_id)
+				g.write(', 0)')
 			}
-			g.gen_expr(base_id)
-			g.write(', 0)')
 		}
 		'delete_last' {
 			g.write('array__delete_last(')
@@ -949,7 +980,7 @@ fn (mut g FlatGen) gen_array_method_call(node flat.Node, fn_node &flat.Node, arr
 			mut is_thread := false
 			elem := cgen_unalias_type(arr.elem_type)
 			if elem is types.Struct {
-				tn := trimmed_space(elem.name)
+				tn := trimmed_space(elem.name())
 				is_thread = tn == 'thread' || tn.starts_with('thread ')
 			}
 			if is_thread {
@@ -976,7 +1007,7 @@ fn (mut g FlatGen) to_fixed_size_call_fixed_type(id flat.NodeId) ?types.ArrayFix
 	if fn_node.kind != .selector || fn_node.value != 'to_fixed_size' || fn_node.children_count == 0 {
 		return none
 	}
-	if node.typ.len > 0 {
+	if node.typ_text().len > 0 {
 		if fixed := array_fixed_type(g.parse_node_type(&node)) {
 			return fixed
 		}
@@ -1089,7 +1120,7 @@ fn (mut g FlatGen) gen_thread_array_wait(base_id flat.NodeId, is_ptr bool, elem_
 	g.needs_thread_runtime = true
 	mut ret_name := ''
 	if elem_type is types.Struct {
-		trimmed := trimmed_space(elem_type.name)
+		trimmed := trimmed_space(elem_type.name())
 		if trimmed != 'thread' && trimmed.starts_with('thread ') {
 			ret_name = trimmed_space(trimmed[7..])
 		}
@@ -1109,7 +1140,7 @@ fn (mut g FlatGen) gen_thread_array_wait(base_id flat.NodeId, is_ptr bool, elem_
 fn (mut g FlatGen) ensure_thread_arr_wait_fn(ret_name string) string {
 	is_void := ret_name.len == 0
 	if !is_void {
-		ret_type := cgen_unalias_type(g.tc.parse_type(ret_name))
+		ret_type := cgen_unalias_type(g.tc.parse_type(flat.source_type_id(ret_name)))
 		if ret_type is types.OptionType || ret_type is types.ResultType {
 			return g.ensure_thread_optional_arr_wait_fn(ret_type)
 		}
@@ -1117,7 +1148,11 @@ fn (mut g FlatGen) ensure_thread_arr_wait_fn(ret_name string) string {
 	// Match the ABI return type the spawn wrapper stores (gen_spawn_expr): an
 	// option/result payload is `__v_option_T`, a fixed-array payload its `_v_ret_*`
 	// wrapper — not the bare `c_type`, or the malloc'd and read-back layouts diverge.
-	ret_ct := if is_void { 'void' } else { g.fn_return_type_name(g.tc.parse_type(ret_name)) }
+	ret_ct := if is_void {
+		'void'
+	} else {
+		g.fn_return_type_name(g.tc.parse_type(flat.source_type_id(ret_name)))
+	}
 	key := 'threadwait|${ret_ct}'
 	if name := g.spawn_wrapper_names[key] {
 		return name
@@ -1538,7 +1573,7 @@ fn (mut g FlatGen) gen_slice_index_array_value(node flat.Node, elem_type types.T
 }
 
 fn (mut g FlatGen) gen_slice_index_value_from_index_range(node flat.Node) {
-	slice_type := g.tc.parse_type('SliceIndex')
+	slice_type := g.tc.parse_type(flat.source_type_id('SliceIndex'))
 	ct := g.value_c_type(slice_type)
 	g.write('(${ct}){.is_range = true')
 	if node.children_count > 1 {
@@ -1563,7 +1598,7 @@ fn (mut g FlatGen) gen_slice_index_value_from_index_range(node flat.Node) {
 }
 
 fn (mut g FlatGen) gen_slice_index_value(id flat.NodeId) {
-	slice_type := g.tc.parse_type('SliceIndex')
+	slice_type := g.tc.parse_type(flat.source_type_id('SliceIndex'))
 	ct := g.value_c_type(slice_type)
 	if int(id) < 0 {
 		g.write('(${ct}){0}')
@@ -1921,9 +1956,21 @@ fn (mut g FlatGen) gen_scalar_array_push_call_stmt(id flat.NodeId, node flat.Nod
 	callee_id := g.a.child(&node, 0)
 	callee := g.a.nodes[int(callee_id)]
 	resolved := g.call_key(id, target)
+	// A call through a global of this name is the program's own. The transformer
+	// records the helper as the target of an append it lowered, which tells the two
+	// apart where the module has such a global.
+	if _ := g.global_type_for_ident(target) {
+		recorded := g.tc.resolved_call_name(id) or { '' }
+		if recorded != target {
+			return false
+		}
+	}
+	// Outside `main` the key of the runtime helper is its module-qualified spelling,
+	// which names no function. Only a key that does name one belongs to the program.
 	if callee.kind != .ident || g.selector_base_is_local_value(target)
 		|| g.non_generic_fn_decl_exists_in_module(target, g.tc.cur_module)
-		|| resolved !in [target, 'builtin.${target}'] {
+		|| (resolved !in [target, 'builtin.${target}']
+			&& (resolved in g.tc.fn_param_types || resolved in g.tc.fn_ret_types)) {
 		return false
 	}
 	array_id := g.a.child(&node, 1)
