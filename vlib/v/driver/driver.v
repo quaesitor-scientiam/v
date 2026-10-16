@@ -6539,10 +6539,7 @@ fn c_hash_monomorph_node(initial u64, a &flat.FlatAst, id flat.NodeId, cacheable
 		hash = c_hash_bytes(hash, attribute_signature.bytes())
 		hash = c_hash_bytes(hash, [u8(0xfd)])
 	}
-	for param in node.generic_params() {
-		hash = c_hash_bytes(hash, param.bytes())
-		hash = c_hash_bytes(hash, [u8(0xfe)])
-	}
+	hash = c_hash_node_params(hash, node)
 	for child_idx in 0 .. node.children_count {
 		hash = c_hash_monomorph_node(hash, a, a.child(&node, child_idx), cacheable_strings, declaration_attributes)
 	}
@@ -6635,6 +6632,28 @@ fn incremental_qualified_fn_name(module_name string, name string) string {
 	return '${module_name}.${name}'
 }
 
+// c_hash_node_params hashes the legacy spelling-byte metadata layout for cache stability.
+// Enum storage types live in their own numeric slot and precede attribute markers only here.
+fn c_hash_node_params(initial u64, node &flat.Node) u64 {
+	mut hash := initial
+	params := node.generic_params()
+	if node.kind == .enum_decl && (node.enum_backing_type_id() != 0 || params.len > 0) {
+		hash = c_hash_bytes(hash, flat.source_type_name(node.enum_backing_type_id()).bytes())
+		hash = c_hash_bytes(hash, [u8(0xfe)])
+	}
+	debugger_types := node.debugger_value_type_ids()
+	debugger_layout := debugger_types.len == int(node.children_count) && params.len == 1 + debugger_types.len * 2
+	for i, param in params {
+		hash = c_hash_bytes(hash, param.bytes())
+		hash = c_hash_bytes(hash, [u8(0xfe)])
+		if debugger_layout && i > 0 && i % 2 == 1 {
+			hash = c_hash_bytes(hash, flat.source_type_name(debugger_types[(i - 1) / 2]).bytes())
+			hash = c_hash_bytes(hash, [u8(0xfe)])
+		}
+	}
+	return hash
+}
+
 fn incremental_hash_node_header(initial u64, node &flat.Node, include_value bool) u64 {
 	mut hash := c_hash_bytes(initial, [u8(node.kind), u8(node.op), u8(node.is_mut),
 		u8(node.skip_ownership_drops()), u8(node.is_static_type_method())])
@@ -6645,10 +6664,7 @@ fn incremental_hash_node_header(initial u64, node &flat.Node, include_value bool
 		hash = c_hash_bytes(hash, node.value.bytes())
 	}
 	hash = c_hash_bytes(hash, [u8(0xff)])
-	for param in node.generic_params() {
-		hash = c_hash_bytes(hash, param.bytes())
-		hash = c_hash_bytes(hash, [u8(0xfe)])
-	}
+	hash = c_hash_node_params(hash, node)
 	return hash
 }
 
@@ -6659,10 +6675,7 @@ fn incremental_hash_fn_declaration(initial u64, node &flat.Node) u64 {
 	hash = c_hash_bytes(hash, [u8(0)])
 	hash = c_hash_bytes(hash, node.value.bytes())
 	hash = c_hash_bytes(hash, [u8(0xff)])
-	for param in node.generic_params() {
-		hash = c_hash_bytes(hash, param.bytes())
-		hash = c_hash_bytes(hash, [u8(0xfe)])
-	}
+	hash = c_hash_node_params(hash, node)
 	return hash
 }
 
@@ -7307,6 +7320,12 @@ fn promote_scoped_node(mut node flat.Node, scope voidptr) {
 	}
 	old_params := node.generic_params()
 	if old_params.len == 0 {
+		debugger_types := node.debugger_value_type_ids()
+		if debugger_types.len > 0 && (scoped_value_owned(scope, node.payload_ptr()) || scoped_value_owned(scope, debugger_types.data)) {
+			node.set_debugger_value_type_ids(debugger_types)
+		} else if node.enum_backing_type_id() != 0 && scoped_value_owned(scope, node.payload_ptr()) {
+			node.set_enum_backing_type_id(node.enum_backing_type_id())
+		}
 		return
 	}
 	old_constraints := node.generic_constraints()
@@ -7437,6 +7456,12 @@ fn canonicalize_scoped_node_cached(mut ast flat.FlatAst, idx int, scope voidptr,
 	}
 	old_params := node.generic_params()
 	if old_params.len == 0 {
+		debugger_types := node.debugger_value_type_ids()
+		if debugger_types.len > 0 && (scoped_value_owned(scope, node.payload_ptr()) || scoped_value_owned(scope, debugger_types.data)) {
+			node.set_debugger_value_type_ids(debugger_types)
+		} else if node.enum_backing_type_id() != 0 && scoped_value_owned(scope, node.payload_ptr()) {
+			node.set_enum_backing_type_id(node.enum_backing_type_id())
+		}
 		return
 	}
 	old_constraints := node.generic_constraints()
@@ -7472,6 +7497,12 @@ fn canonicalize_scoped_node(mut ast flat.FlatAst, idx int, scope voidptr) {
 	}
 	old_params := node.generic_params()
 	if old_params.len == 0 {
+		debugger_types := node.debugger_value_type_ids()
+		if debugger_types.len > 0 && (scoped_value_owned(scope, node.payload_ptr()) || scoped_value_owned(scope, debugger_types.data)) {
+			node.set_debugger_value_type_ids(debugger_types)
+		} else if node.enum_backing_type_id() != 0 && scoped_value_owned(scope, node.payload_ptr()) {
+			node.set_enum_backing_type_id(node.enum_backing_type_id())
+		}
 		return
 	}
 	old_constraints := node.generic_constraints()
@@ -7503,7 +7534,8 @@ fn canonicalize_scoped_node(mut ast flat.FlatAst, idx int, scope voidptr) {
 // the constraints they name, live in the scope's memory: its payload, their
 // arrays or their strings.
 fn scoped_generic_payload_owned(node &flat.Node, params []string, constraints []string, scope voidptr) bool {
-	if scoped_value_owned(scope, node.payload_ptr()) || scoped_value_owned(scope, params.data)
+	debugger_types := node.debugger_value_type_ids()
+	if (debugger_types.len > 0 && scoped_value_owned(scope, debugger_types.data)) || scoped_value_owned(scope, node.payload_ptr()) || scoped_value_owned(scope, params.data)
 		|| (constraints.len > 0 && scoped_value_owned(scope, constraints.data)) {
 		return true
 	}
@@ -7659,6 +7691,22 @@ fn clone_string_list_map(values map[string][]string) map[string][]string {
 	return cloned
 }
 
+fn clone_type_owner_field_flags(values map[u32]map[string]bool) map[u32]map[string]bool {
+	mut cloned := map[u32]map[string]bool{}
+	for owner_id, fields in values {
+		cloned[owner_id] = clone_string_bool_map(fields)
+	}
+	return cloned
+}
+
+fn clone_type_owner_c_abi_fields(values map[u32]map[string]string) map[u32]map[string]string {
+	mut cloned := map[u32]map[string]string{}
+	for owner_id, fields in values {
+		cloned[owner_id] = clone_string_string_map(fields)
+	}
+	return cloned
+}
+
 fn promote_scoped_type_metadata(mut tc types.TypeChecker) {
 	// Transform and specialization can grow these maps inside a disposable arena,
 	// so move both their storage and string payloads before releasing that arena.
@@ -7680,8 +7728,9 @@ fn promote_scoped_type_metadata(mut tc types.TypeChecker) {
 		clone_string_bool_map(tc.struct_error_embeds_shadow_builtin)
 	tc.struct_generic_params = clone_string_list_map(tc.struct_generic_params)
 	tc.struct_implements = tc.struct_implements.clone_owned()
-	tc.struct_shared_fields = clone_string_bool_map(tc.struct_shared_fields)
-	tc.struct_field_c_abi_fns = clone_string_string_map(tc.struct_field_c_abi_fns)
+	tc.struct_shared_fields = clone_type_owner_field_flags(tc.struct_shared_fields)
+	tc.struct_shared_element_fields = clone_type_owner_field_flags(tc.struct_shared_element_fields)
+	tc.struct_field_c_abi_fns = clone_type_owner_c_abi_fields(tc.struct_field_c_abi_fns)
 	tc.unions = clone_string_bool_map(tc.unions)
 	tc.params_structs = clone_string_bool_map(tc.params_structs)
 	tc.c_typedef_structs = clone_string_bool_map(tc.c_typedef_structs)
@@ -8090,7 +8139,12 @@ fn v3_select_c_compiler(vroot string, requested V3BundledTccProbeOptions) V3CCom
 	mut c_compiler := v3_select_implicit_c_compiler(options.c_compiler, options.c_compiler_explicit,
 		implicit_tcc)
 	if options.prefer_platform_cc && !options.c_compiler_explicit && options.c_compiler == 'cc' {
-		c_compiler = v3_platform_c_compiler(options.host_os)
+		// Only Windows needs the absolute path: a bare name does not respawn there.
+		c_compiler = if options.host_os == 'windows' {
+			v3_platform_c_compiler_command(options.host_os)
+		} else {
+			v3_platform_c_compiler(options.host_os)
+		}
 	}
 	if v3_windows_prod_needs_default_c_compiler(options) {
 		c_compiler = v3_windows_prod_default_c_compiler(options.target.arch, options.is_o)
@@ -8779,8 +8833,24 @@ fn incremental_node_tree_uses_generics(a &flat.FlatAst, tc &types.TypeChecker, r
 			}
 		}
 		mut type_names := [node.typ_text(), node.value]
-		if node.generic_params().len > 0 && node.value.len > 0 {
-			type_names << '${node.value}[${node.generic_params().join(', ')}]'
+		mut params := node.generic_params()
+		debugger_types := node.debugger_value_type_ids()
+		if node.value.len > 0 && debugger_types.len == int(node.children_count) && params.len == 1 + debugger_types.len * 2 {
+			mut rendered := []string{cap: params.len + debugger_types.len}
+			for i, param in params {
+				rendered << param
+				if i > 0 && i % 2 == 1 {
+					rendered << flat.source_type_name(debugger_types[(i - 1) / 2])
+				}
+			}
+			params = rendered.clone()
+		}
+		if node.kind == .enum_decl && node.value.len > 0 && (node.enum_backing_type_id() != 0 || params.len > 0) {
+			// This cache probe retains the legacy source signature projection.
+			suffix := if params.len > 0 { ', ' + params.join(', ') } else { '' }
+			type_names << '${node.value}[${flat.source_type_name(node.enum_backing_type_id())}${suffix}]'
+		} else if params.len > 0 && node.value.len > 0 {
+			type_names << '${node.value}[${params.join(', ')}]'
 		}
 		for type_name in type_names {
 			if incremental_type_is_generic_named_application(type_name, module_name, tc) {
@@ -9793,6 +9863,42 @@ fn v3_module_cache_refresh_args(args []string, compiler string, module_search_pa
 	resolved_compiler := os.find_abs_path_of_executable(compiler) or { os.abs_path(compiler) }
 	flags << ['-cc', resolved_compiler]
 	return flags
+}
+
+// v3_live_rebuild_options keeps compile inputs while removing executable-only switches.
+fn v3_live_rebuild_options(args []string, compiler string, module_search_paths []string) []string {
+	mut options := []string{}
+	mut input_seen := false
+	mut running := false
+	mut i := 0
+	for i < args.len {
+		arg := args[i]
+		if running && input_seen { break }
+		if v3_driver_option_consumes_value(arg) {
+			if i + 1 < args.len && arg !in ['-o', '-output', '-cc', '-path', '-run-only', '-test-runner',
+				'-dump-c-flags', '-dump-files', '-generate-c-project'] {
+				options << [arg, args[i + 1]]
+			}
+			i += 2
+			continue
+		}
+		if arg in ['run', 'crun'] {
+			running = true
+		} else if arg.starts_with('-') {
+			if arg !in ['-live', '-sharedlive', '-shared', '--shared', '-check', '-check-syntax',
+				'-skip-running', '-o', '-output'] {
+				options << arg
+			}
+		} else if arg !in ['build', 'test'] {
+			input_seen = true
+		}
+		i++
+	}
+	if module_search_paths.len > 0 {
+		options << ['-path', module_search_paths.join('|')]
+	}
+	options << ['-cc', compiler]
+	return options
 }
 
 fn v3_cache_refresh_c_flag(flag string) string {
@@ -11201,6 +11307,8 @@ pub fn run(args []string) {
 	// one OS, architecture or C compiler, so that a single generated snapshot
 	// (`vc/v.c`) bootstraps V everywhere. Generate against the host target and
 	// leave every target-dependent `$if` to the C preprocessor.
+	explicit_windows_target := target_os_explicit
+		&& pref.normalized_os(target_os.trim_space().to_lower()) == 'windows'
 	mut output_cross_c := cross_output
 	if pref.normalized_os(target_os.trim_space().to_lower()) == 'cross' {
 		output_cross_c = true
@@ -11234,7 +11342,9 @@ pub fn run(args []string) {
 		eprintln('option `-target-libc-headers` does not support Windows targets')
 		exit(1)
 	}
-	if target_libc_headers && backend != 'c' {
+	if target_libc_headers && backend != 'c'
+		&& !(backend == 'fastc' && (output_file == '-' || output_file.ends_with('.c'))
+			&& (target.os != pref.host_target().os || target.arch != pref.host_target().arch)) {
 		eprintln('option `-target-libc-headers` requires the C backend')
 		exit(1)
 	}
@@ -11287,7 +11397,7 @@ pub fn run(args []string) {
 			}
 		}
 	}
-	if building_v || cmd_v_build {
+	if (building_v || cmd_v_build) && !target_libc_headers {
 		if no_parallel {
 			// This controls the current build only. Keep parallel support in the output
 			// compiler so its module graph does not depend on how it was bootstrapped.
@@ -11586,9 +11696,12 @@ pub fn run(args []string) {
 		&& !target_libc_headers
 		&& target.os in ['macos', 'linux', 'freebsd', 'openbsd', 'dragonfly', 'windows', 'android',
 			'termux', 'ios'] {
-		// vc/v.c must bootstrap without platform headers or checkout-local objects.
-		// Keep the signal-context ABI out of this portable compiler snapshot.
-		record_user_define(mut user_defines, mut compile_values, 'v3_headerless_bootstrap')
+		// Windows snapshots embed SDK-backed helpers, including the ACL and atomic
+		// compatibility surface. Other hosted snapshots use V-owned declarations.
+		if !explicit_windows_target {
+			record_user_define(mut user_defines, mut compile_values, 'v3_headerless_bootstrap')
+		}
+		// Keep the signal-context ABI out of portable compiler snapshots.
 		record_user_define(mut user_defines, mut compile_values, 'no_segfault_handler')
 	}
 	prefs.user_defines = user_defines
@@ -11642,7 +11755,8 @@ pub fn run(args []string) {
 	if verbose {
 		eprintln('v.pref.lookup_path: ${os.join_path(prefs.vroot, 'vlib')}')
 	}
-	prefs.supports_inline_asm = is_checker_fixture
+	prefs.supports_inline_asm = is_checker_fixture || (backend == 'fastc' && c_only
+		&& target.arch in ['amd64', 'arm64'])
 	if backend == 'fastc' {
 		$if skip_fastc ? {
 			eprintln('fastc support is not compiled into this v3 executable')
@@ -11687,7 +11801,7 @@ pub fn run(args []string) {
 			if fastc_test_file {
 				prefs.is_test = true
 			}
-			if is_prod {
+			if is_prod && !(c_only && fastc_cross_target) {
 				unsupported_modes << '`-prod`'
 			}
 			if is_shared || is_livemain || is_liveshared {
@@ -12307,6 +12421,10 @@ pub fn run(args []string) {
 	}
 	if is_prof {
 		user_files << os.join_path(prefs.vroot, 'vlib', 'v', 'preludes', 'profiled_program.v')
+	}
+	if !no_preludes && (is_livemain || is_liveshared) {
+		live_prelude := if is_livemain { 'live_main.v' } else { 'live_shared.v' }
+		parse_files_dispatch_profiled(mut p, [os.join_path(prefs.vroot, 'vlib', 'v', 'preludes', live_prelude)], false, mut parse_timing)
 	}
 	if is_trace_calls {
 		// Parse the runtime import before user files. Implicit imports such as
@@ -13452,6 +13570,11 @@ pub fn run(args []string) {
 				fatal_errors, message_limit, skip_notices)
 		}
 		if pre_tc.has_noalloc_contracts() {
+			if cache_state.manager.enabled && !cache_state.force_source {
+				// Allocation contracts inspect V callee bodies, which cache headers omit.
+				trace_v3_cache_fallback('allocation contracts need the original function bodies')
+				restart_v3_with_args([v3_internal_force_cache_source_flag])
+			}
 			pre_tc.check_noalloc_contracts(false, noalloc_unsupported_modes)
 			if pre_tc.errors.len > 0 {
 				restart_v3_for_checker_errors_of_pruned_build(&cache_state.manager, pre_tc.errors,
@@ -13548,7 +13671,7 @@ pub fn run(args []string) {
 				return
 			}
 		}
-		_ = pre_tc.ierror_impl_names()
+		_ = flat.TypeTextList{ ids: pre_tc.ierror_impl_names() }.names()
 		// Self-host markused is dominated by serial reachability/index work. Build
 		// transform's read-only indexes beside it so the otherwise-idle cores do
 		// useful work without delaying either stage's mutable AST operations.
@@ -13798,6 +13921,8 @@ pub fn run(args []string) {
 			// transformer indexes and per-body temporary state use a stage arena.
 			if cache_state.manager.enabled {
 				transform.reserve_parallel_transform_cache_ast(mut a, skip_transform_generics)
+			} else if uses_generics {
+				transform.reserve_parallel_transform_ast_before_monomorph(mut a, skip_transform_generics)
 			} else {
 				transform.reserve_parallel_transform_ast(mut a, skip_transform_generics)
 			}
@@ -14041,7 +14166,7 @@ pub fn run(args []string) {
 						if node.value.len > 0 && scoped_value_owned(transform_scope, node.value.str) {
 							leaked_nv++
 						}
-						if node.typ_text().len > 0 && scoped_value_owned(transform_scope, node.typ_text().str) {
+						if node.typ != 0 && scoped_value_owned(transform_scope, node.typ_text().str) {
 							leaked_nt++
 						}
 					}
@@ -14726,6 +14851,10 @@ pub fn run(args []string) {
 			g.set_skip_generics(skip_transform_generics)
 			g.set_skip_enum_autostr(trivial_literal_output)
 			g.set_compiler_vexe(prefs.vexe)
+			g.set_live_source_path(input_file)
+			if is_livemain {
+				g.set_live_rebuild_options(v3_live_rebuild_options(args, c_compiler, prefs.module_search_paths))
+			}
 			g.set_compiler_vexe_env_setup(!pref.has_macos_v3_caller_environment())
 			g.set_target(prefs.target)
 			g.set_output_cross_c(prefs.output_cross_c)
@@ -14816,6 +14945,10 @@ pub fn run(args []string) {
 			g.set_skip_generics(skip_transform_generics)
 			g.set_skip_enum_autostr(trivial_literal_output)
 			g.set_compiler_vexe(prefs.vexe)
+			g.set_live_source_path(input_file)
+			if is_livemain {
+				g.set_live_rebuild_options(v3_live_rebuild_options(args, c_compiler, prefs.module_search_paths))
+			}
 			g.set_compiler_vexe_env_setup(!pref.has_macos_v3_caller_environment())
 			g.set_target(prefs.target)
 			g.set_output_cross_c(prefs.output_cross_c)
@@ -18349,13 +18482,13 @@ fn v3_cached_object_compile_signature(compiler V3CachedObjectCompiler, c_standar
 struct V3InterfaceScopes {
 mut:
 	signature string
-	names     []string            // the interfaces, in the order of the signature
-	owners    []string            // the module that declares each of them
-	lines     map[string]string   // interface -> `name=impl,impl`
-	impls     map[string][]string // interface -> its implementers
-	modules   map[string]string   // name without a module prefix -> declaring module
-	outside   map[string]string   // implementer -> declaring module, `` for a generic one
-	reach     map[string][]string // implementer -> the interfaces among its fields
+	names     []u32             // interface spelling IDs, in signature order
+	owners    []string          // the module that declares each of them
+	lines     map[u32]string    // interface spelling ID -> raw `name=impl,impl`
+	impls     map[u32][]u32     // interface spelling ID -> implementer spelling IDs
+	modules   map[string]string // name without a module prefix -> declaring module
+	outside   map[u32]string    // implementer spelling ID -> declaring module, `` for a generic one
+	reach     map[u32][]u32     // implementer spelling ID -> interfaces among its fields
 }
 
 fn parse_v3_interface_scopes(signature string) V3InterfaceScopes {
@@ -18370,11 +18503,11 @@ fn parse_v3_interface_scopes(signature string) V3InterfaceScopes {
 		}
 		if line.starts_with('#reach ') {
 			fact := line['#reach '.len..]
-			scopes.reach[fact.all_before_last('=')] = v3_split_type_names(fact.all_after_last('='))
+			scopes.reach[flat.source_type_id(fact.all_before_last('='))] = v3_split_type_names(fact.all_after_last('='))
 			continue
 		}
 		name := v3_interface_line_name(line)
-		if name.len == 0 {
+		if name == 0 {
 			continue
 		}
 		scopes.names << name
@@ -18383,13 +18516,13 @@ fn parse_v3_interface_scopes(signature string) V3InterfaceScopes {
 	for name in scopes.names {
 		scopes.owners << scopes.declaring_module(name)
 		line := scopes.lines[name]
-		impls := v3_split_type_names(line[name.len + 1..])
+		impls := v3_split_type_names(line[flat.source_type_name(name).len + 1..])
 		scopes.impls[name] = impls
 		for impl in impls {
 			if impl !in scopes.outside {
 				// The fields of a generic implementer have the types of its arguments,
 				// which no module name stands for.
-				scopes.outside[impl] = if impl.contains('[') {
+				scopes.outside[impl] = if flat.source_type_name(impl).contains('[') {
 					''
 				} else {
 					scopes.declaring_module(impl)
@@ -18405,7 +18538,7 @@ fn v3_cache_refresh_needs_entry(signature string, state &V3ModuleCacheState, vro
 	vlib := os.real_path(os.join_path(vroot, 'vlib')) + os.path_separator
 	for name in scopes.names {
 		if scopes.declaring_module(name) == 'main' { continue }
-		for impl in scopes.impls[name] or { []string{} } {
+		for impl in scopes.impls[name] or { []u32{} } {
 			owner := scopes.declaring_module(impl)
 			if owner == 'main' { return true }
 			if owner == 'builtin' { continue }
@@ -18417,9 +18550,9 @@ fn v3_cache_refresh_needs_entry(signature string, state &V3ModuleCacheState, vro
 	return false
 }
 
-// v3_interface_line_name returns the interface of a `name=impl,impl` line. The
+// v3_interface_line_name returns the interface spelling ID of a `name=impl,impl` line. The
 // name of a generic interface holds its type arguments, and those hold no `=`.
-fn v3_interface_line_name(line string) string {
+fn v3_interface_line_name(line string) u32 {
 	mut depth := 0
 	for i, ch in line {
 		if ch == `[` {
@@ -18427,16 +18560,16 @@ fn v3_interface_line_name(line string) string {
 		} else if ch == `]` {
 			depth--
 		} else if ch == `=` && depth == 0 {
-			return line[..i]
+			return flat.source_type_id(line[..i])
 		}
 	}
-	return ''
+	return u32(0)
 }
 
-// v3_split_type_names splits `a,b[c, d],e` at the commas that are not inside the
-// type arguments of a name.
-fn v3_split_type_names(list string) []string {
-	mut names := []string{}
+// v3_split_type_names returns spelling IDs split at commas outside the type arguments
+// of a name, as in `a,b[c, d],e`.
+fn v3_split_type_names(list string) []u32 {
+	mut names := []u32{}
 	mut depth := 0
 	mut start := 0
 	for i, ch in list {
@@ -18446,20 +18579,21 @@ fn v3_split_type_names(list string) []string {
 			depth--
 		} else if ch == `,` && depth == 0 {
 			if i > start {
-				names << list[start..i]
+				names << flat.source_type_id(list[start..i])
 			}
 			start = i + 1
 		}
 	}
 	if start < list.len {
-		names << list[start..]
+		names << flat.source_type_id(list[start..])
 	}
 	return names
 }
 
 // declaring_module returns the module that declares the type `name`, as the type
 // checker names modules (`json2` for `x.json2`), or `?` when nothing says so.
-fn (scopes &V3InterfaceScopes) declaring_module(name string) string {
+fn (scopes &V3InterfaceScopes) declaring_module(name_id u32) string {
+	name := flat.source_type_name(name_id)
 	base := name.all_before('[')
 	if base.contains('.') {
 		return base.all_before_last('.')
@@ -18483,8 +18617,8 @@ fn (scopes &V3InterfaceScopes) declaring_module(name string) string {
 // An interface or an implementer that the signature says too little about makes
 // the module depend on every list, as all of them did before.
 fn (scopes &V3InterfaceScopes) module_signature(visible map[string]bool) string {
-	mut in_scope := map[string]bool{}
-	mut pending := []string{cap: scopes.names.len}
+	mut in_scope := map[u32]bool{}
+	mut pending := []u32{cap: scopes.names.len}
 	for i, name in scopes.names {
 		owner := scopes.owners[i]
 		// The code of a module cannot name an interface of the program.
@@ -18514,7 +18648,7 @@ fn (scopes &V3InterfaceScopes) module_signature(visible map[string]bool) string 
 				// Its fields have the types of modules that are visible as well.
 				continue
 			}
-			for reached in scopes.reach[impl] or { []string{} } {
+			for reached in scopes.reach[impl] or { []u32{} } {
 				if reached !in scopes.lines {
 					return scopes.signature
 				}
@@ -20045,12 +20179,12 @@ fn unsupported_wasm_struct_infix_error(a &flat.FlatAst, tc &types.TypeChecker, i
 	if node.kind == .infix && node.children_count >= 2 && node.op in [.eq, .ne] {
 		lhs_type := tc.resolve_type(a.child(&node, 0))
 		rhs_type := tc.resolve_type(a.child(&node, 1))
-		lhs_name := lhs_type.name().trim_string_left('main.')
-		rhs_name := rhs_type.name().trim_string_left('main.')
-		if lhs_name == rhs_name && lhs_name.len > 0 && lhs_name in tc.structs
+		lhs_name := wasm_type_without_main_prefix(lhs_type.source_type_id())
+		rhs_name := wasm_type_without_main_prefix(rhs_type.source_type_id())
+		if lhs_name == rhs_name && lhs_name != 0 && flat.source_type_name(lhs_name) in tc.structs
 			&& !wasm_supported_struct(tc, lhs_name) {
 			operator := if node.op == .eq { '==' } else { '!=' }
-			return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${lhs_name}` yet'
+			return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${flat.source_type_name(lhs_name)}` yet'
 		}
 		// Struct equality is lowered before backend validation into field-wise
 		// comparisons. Recover the aggregate type from selector operands so the
@@ -20058,10 +20192,10 @@ fn unsupported_wasm_struct_infix_error(a &flat.FlatAst, tc &types.TypeChecker, i
 		// first lowered struct literal.
 		lhs_origin := wasm_struct_origin_type(a, a.child(&node, 0))
 		rhs_origin := wasm_struct_origin_type(a, a.child(&node, 1))
-		if lhs_origin.len > 0 && lhs_origin == rhs_origin
+		if lhs_origin != 0 && lhs_origin == rhs_origin
 			&& !wasm_supported_struct(tc, lhs_origin) {
 			operator := if node.op == .eq { '==' } else { '!=' }
-			return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${lhs_origin}` yet'
+			return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${flat.source_type_name(lhs_origin)}` yet'
 		}
 	}
 	for i in 0 .. node.children_count {
@@ -20072,19 +20206,25 @@ fn unsupported_wasm_struct_infix_error(a &flat.FlatAst, tc &types.TypeChecker, i
 	return none
 }
 
-fn wasm_struct_origin_type(a &flat.FlatAst, id flat.NodeId) string {
+fn wasm_type_without_main_prefix(type_id u32) u32 {
+	type_name := flat.source_type_name(type_id)
+	name := type_name.trim_string_left('main.')
+	return if name == type_name { type_id } else { flat.source_type_id(name) }
+}
+
+fn wasm_struct_origin_type(a &flat.FlatAst, id flat.NodeId) u32 {
 	idx := int(id)
 	if idx < 0 || idx >= a.nodes.len {
-		return ''
+		return 0
 	}
 	node := a.nodes[idx]
 	if node.kind == .struct_init {
-		return node.typ_text().trim_string_left('main.')
+		return wasm_type_without_main_prefix(node.typ)
 	}
 	if node.kind in [.selector, .cast_expr, .paren] && node.children_count > 0 {
 		return wasm_struct_origin_type(a, a.child(&node, 0))
 	}
-	return ''
+	return 0
 }
 
 fn backend_node_location(a &flat.FlatAst, node flat.Node) string {
@@ -20172,7 +20312,11 @@ fn msvc_inline_asm_node_error(a &flat.FlatAst, id flat.NodeId, top_level bool, m
 // wasm_supported_array_elem reports whether a resolved array type name has
 // primitive elements the wasm backend lowers today. Single dimension only:
 // nested arrays need inner-header handling that does not exist yet.
-fn wasm_supported_array_elem(type_name string) bool {
+fn wasm_supported_array_elem(type_id u32) bool {
+	return wasm_supported_array_elem_bytes(flat.source_type_name(type_id))
+}
+
+fn wasm_supported_array_elem_bytes(type_name string) bool {
 	if !type_name.starts_with('[]') || type_name.len <= 2 {
 		return false
 	}
@@ -20186,15 +20330,15 @@ fn wasm_supported_array_elem(type_name string) bool {
 // another struct that satisfies the same rule. Structs are walked recursively
 // with a depth bound, because a self-referential type through a pointer field
 // would otherwise loop the walk for ever.
-fn wasm_supported_struct(tc &types.TypeChecker, type_name string) bool {
-	return wasm_struct_fields_supported(tc, type_name, 0)
+fn wasm_supported_struct(tc &types.TypeChecker, type_id u32) bool {
+	return wasm_struct_fields_supported(tc, type_id, 0)
 }
 
-fn wasm_struct_fields_supported(tc &types.TypeChecker, type_name string, depth int) bool {
+fn wasm_struct_fields_supported(tc &types.TypeChecker, type_id u32, depth int) bool {
 	if depth > 8 {
 		return false
 	}
-	name := type_name.trim_string_left('main.@')
+	name := flat.source_type_name(type_id).trim_string_left('main.@')
 	if name == '' {
 		return false
 	}
@@ -20217,7 +20361,7 @@ fn wasm_struct_field_supported(tc &types.TypeChecker, typ types.Type, depth int)
 			return true
 		}
 		types.Struct {
-			return wasm_struct_fields_supported(tc, typ.name(), depth + 1)
+			return wasm_struct_fields_supported(tc, typ.source_type_id(), depth + 1)
 		}
 		types.Pointer {
 			// A pointer is only an i32 on this target, but the pointee still
@@ -20239,9 +20383,9 @@ fn unsupported_backend_node_error(a &flat.FlatAst, tc &types.TypeChecker, id fla
 	visited[idx] = true
 	node := a.nodes[idx]
 	if backend == 'wasm' && diagnose_aggregates {
-		mut unsupported_type := ''
+		mut unsupported_type := u32(0)
 		if node.kind in [.array_literal, .array_init, .map_init, .struct_init] {
-			unsupported_type = tc.resolve_type(id).name()
+			unsupported_type = tc.resolve_type(id).source_type_id()
 			// Dynamic arrays of primitive elements lower in the wasm backend
 			// (literals, init, index, push, slices, for-in). Anything else
 			// stays gated: maps, fixed arrays, and nested arrays have no wasm
@@ -20249,7 +20393,7 @@ fn unsupported_backend_node_error(a &flat.FlatAst, tc &types.TypeChecker, id fla
 			// error.
 			if (node.kind == .array_literal || node.kind == .array_init)
 				&& wasm_supported_array_elem(unsupported_type) {
-				unsupported_type = ''
+				unsupported_type = 0
 			}
 			// Struct literals lower too, when every field has a lowering: the
 			// backend already copies aggregates through pointers and returns
@@ -20257,25 +20401,25 @@ fn unsupported_backend_node_error(a &flat.FlatAst, tc &types.TypeChecker, id fla
 			// are accepted; arrays, maps, options and results as fields are
 			// not, so a struct holding one stays rejected.
 			if node.kind == .struct_init && wasm_supported_struct(tc, unsupported_type) {
-				unsupported_type = ''
+				unsupported_type = 0
 			}
 		} else if node.kind == .call && node.children_count > 0 {
 			callee := a.child_node(&node, 0)
 			if callee.kind == .ident && callee.value == 'new_map' {
-				unsupported_type = tc.resolve_type(id).name()
+				unsupported_type = tc.resolve_type(id).source_type_id()
 			}
 		}
-		if unsupported_type.len > 0 {
-			return '${fallback_location}error: the V wasm backend does not support type `${unsupported_type}` yet'
+		if unsupported_type != 0 {
+			return '${fallback_location}error: the V wasm backend does not support type `${flat.source_type_name(unsupported_type)}` yet'
 		}
 		if node.kind == .infix && node.children_count >= 2 && node.op in [.eq, .ne] {
 			lhs_type := tc.resolve_type(a.child(&node, 0))
 			rhs_type := tc.resolve_type(a.child(&node, 1))
-			lhs_name := lhs_type.name().trim_string_left('main.')
-			rhs_name := rhs_type.name().trim_string_left('main.')
-			if lhs_name == rhs_name && lhs_name.len > 0 && lhs_name in tc.structs {
+			lhs_name := wasm_type_without_main_prefix(lhs_type.source_type_id())
+			rhs_name := wasm_type_without_main_prefix(rhs_type.source_type_id())
+			if lhs_name == rhs_name && lhs_name != 0 && flat.source_type_name(lhs_name) in tc.structs {
 				operator := if node.op == .eq { '==' } else { '!=' }
-				return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${lhs_name}` yet'
+				return '${fallback_location}error: the V wasm backend does not support `${operator}` for type `${flat.source_type_name(lhs_name)}` yet'
 			}
 		}
 	}
@@ -21248,12 +21392,12 @@ fn scan_implicit_imports(a &flat.FlatAst, end_node int, mut scan ImplicitImportS
 		}
 		if !scan.needs_sync {
 			if node.kind == .lock_expr
-				|| (node.kind in [.field_decl, .param] && type_text_is_shared(node.typ_text()))
+				|| (node.kind in [.field_decl, .param] && type_text_is_shared(node.typ))
 				|| (node.kind == .decl_assign && decl_assign_value_is_shared(node.value))
 				|| (node.kind == .struct_init && node.value.starts_with('chan '))
 				|| (node.kind == .infix && node.op == .arrow)
 				|| (node.kind == .prefix && node.op == .arrow)
-				|| (node.typ_text().len > 0 && type_text_is_channel(node.typ_text())) {
+				|| (node.typ != 0 && type_text_is_channel(node.typ)) {
 				scan.needs_sync = true
 			}
 		}
@@ -21717,7 +21861,7 @@ fn implicit_known_field_selectors(a &flat.FlatAst, start int, end int, index Imp
 	mut candidates := []flat.NodeId{}
 	mut declarations := []flat.NodeId{}
 	mut untyped := []string{}
-	mut shared_types := []string{}
+	mut shared_types := []u32{}
 	mut stack := []flat.NodeId{}
 	for fn_idx in start .. end {
 		fn_node := a.nodes[fn_idx]
@@ -21738,8 +21882,8 @@ fn implicit_known_field_selectors(a &flat.FlatAst, start int, end int, index Imp
 				local_names[child.value] = true
 				if bindings.contains(child.value) {
 					ambiguous[child.value] = true
-				} else if child.typ_text().len > 0 {
-					bindings.set(child.value, implicit_normalize_type(child.typ_text(), index))
+				} else if child.typ != 0 {
+					bindings.set_id(child.value, implicit_normalize_type(child.typ, index))
 				}
 			} else {
 				stack << child_id
@@ -21810,24 +21954,28 @@ fn implicit_known_field_selectors(a &flat.FlatAst, start int, end int, index Imp
 							continue
 						}
 						typ := if one_value {
-							if shared_types.len == names { shared_types[name_idx] } else { '' }
+							if shared_types.len == names { shared_types[name_idx] } else { u32(0) }
 						} else if name_idx < values {
 							implicit_expr_type(a, a.child(declaration, name_idx * 2 + 1), bindings, index, 0)
 						} else {
-							''
+							u32(0)
 						}
-						if typ == '' {
+						if typ == 0 {
 							untyped << lhs.value
 							continue
 						}
-						normalized := implicit_normalize_type(typ, index)
-						if old := bindings.get(lhs.value) {
-							if old != normalized {
+						normalized_source_id := implicit_normalize_type(typ, index)
+						normalized_comparison_type_id := normalized_source_id
+
+						if old_source_id := bindings.type_id(lhs.value) {
+							old_comparison_type_id := old_source_id
+
+							if old_comparison_type_id != normalized_comparison_type_id {
 								ambiguous[lhs.value] = true
 								dropped = true
 							}
 						} else {
-							bindings.set(lhs.value, normalized)
+							bindings.set_id(lhs.value, normalized_source_id)
 							changed = true
 						}
 					}
@@ -21850,8 +21998,8 @@ fn implicit_known_field_selectors(a &flat.FlatAst, start int, end int, index Imp
 			bindings.clear()
 			for child_idx in 0 .. fn_node.children_count {
 				child := a.child_node(&fn_node, child_idx)
-				if child.kind == .param && child.typ_text().len > 0 && !bindings.contains(child.value) {
-					bindings.set(child.value, implicit_normalize_type(child.typ_text(), index))
+				if child.kind == .param && child.typ != 0 && !bindings.contains(child.value) {
+					bindings.set_id(child.value, implicit_normalize_type(child.typ, index))
 				}
 			}
 		}
@@ -21862,8 +22010,9 @@ fn implicit_known_field_selectors(a &flat.FlatAst, start int, end int, index Imp
 			if base.kind == .ident && base.value in ambiguous {
 				continue
 			}
-			base_type := implicit_expr_type(a, base_id, bindings, index, 0)
-			if implicit_type_has_field(base_type, selector.value, index) {
+			base_type_source_id := implicit_expr_type(a, base_id, bindings, index, 0)
+
+			if implicit_type_has_field(base_type_source_id, selector.value, index) {
 				selectors[int(selector_id)] = true
 				continue
 			}
@@ -21914,10 +22063,10 @@ fn implicit_declared_child(name_idx int, values int) int {
 // implicit_multi_value_types returns the types of the values of `typ`, the
 // return type of a function that returns several, `(string, []int)`; none when
 // it is not one.
-fn implicit_multi_value_types(raw string, index ImplicitFieldScanIndex) []string {
-	typ := implicit_normalize_type(raw, index)
+fn implicit_multi_value_types(raw_id u32, index ImplicitFieldScanIndex) []u32 {
+	typ := flat.source_type_name(implicit_normalize_type(raw_id, index))
 	if typ.len < 2 || typ[0] != `(` || typ[typ.len - 1] != `)` {
-		return []string{}
+		return flat.TypeTextList.from_names([]string{}).ids
 	}
 	mut parts := []string{}
 	mut depth := 0
@@ -21941,9 +22090,9 @@ fn implicit_multi_value_types(raw string, index ImplicitFieldScanIndex) []string
 	}
 	parts << implicit_trim_space(typ[start..typ.len - 1])
 	if depth != 0 || parts.any(it == '') {
-		return []string{}
+		return flat.TypeTextList.from_names([]string{}).ids
 	}
-	return parts
+	return flat.TypeTextList.from_names(parts).ids
 }
 
 fn implicit_field_scan_index_append(a &flat.FlatAst, start int, end int, mut index ImplicitFieldScanIndex) {
@@ -21952,7 +22101,7 @@ fn implicit_field_scan_index_append(a &flat.FlatAst, start int, end int, mut ind
 		node_ref := a.node(flat.NodeId(idx))
 		match node.kind {
 			.import_decl {
-				alias := if node.typ_text().len > 0 {
+				alias := if node.typ != 0 {
 					node.typ_text()
 				} else {
 					node.value.all_after_last('.')
@@ -21967,7 +22116,7 @@ fn implicit_field_scan_index_append(a &flat.FlatAst, start int, end int, mut ind
 				}
 			}
 			.type_decl {
-				if node.value.len > 0 && node.typ_text().len > 0 {
+				if node.value.len > 0 && node.typ != 0 {
 					index.write(ImplicitIndexOp{
 						kind:  .alias
 						key:   node.value
@@ -22011,7 +22160,7 @@ fn implicit_field_scan_index_append(a &flat.FlatAst, start int, end int, mut ind
 				}
 			}
 			.fn_decl, .c_fn_decl {
-				if node.value.len == 0 || node.typ_text().len == 0 {
+				if node.value.len == 0 || node.typ == 0 {
 					continue
 				}
 				index.write(ImplicitIndexOp{
@@ -22041,84 +22190,86 @@ fn implicit_field_scan_index_append(a &flat.FlatAst, start int, end int, mut ind
 			if field.kind != .const_field || field.children_count == 0 {
 				continue
 			}
-			typ := if field.typ_text().len > 0 {
-				field.typ_text()
+			typ := if field.typ != 0 {
+				field.typ
 			} else {
 				implicit_expr_type(a, a.child(field, 0), index.globals, ImplicitFieldScanIndex{
 					...index
 					bindings_are_globals: true
 				}, 0)
 			}
-			if typ.len > 0 {
-				global_type := implicit_normalize_type(typ, index)
+			if typ != 0 {
+				global_type_source_id := implicit_normalize_type(typ, index)
+
 				index.write(ImplicitIndexOp{
 					kind:  .global
 					key:   field.value
-					value: flat.source_type_id(global_type)
+					value: global_type_source_id
 				})
-				index.globals.set(field.value, global_type)
+				index.globals.set_id(field.value, global_type_source_id)
 			}
 		}
 	}
 }
 
-fn implicit_expr_type(a &flat.FlatAst, id flat.NodeId, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) string {
+fn implicit_expr_type(a &flat.FlatAst, id flat.NodeId, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) u32 {
 	if int(id) < 0 || depth > 12 {
-		return ''
+		return u32(0)
 	}
 	node := a.node(id)
-	if node.typ_text().len > 0 {
-		return implicit_normalize_type(node.typ_text(), index)
+	if node.typ != 0 {
+		return implicit_normalize_type(node.typ, index)
 	}
 	match node.kind {
 		.ident {
 			if index.bindings_are_globals {
 				index.read('g:', node.value)
 			}
-			if typ := bindings.get(node.value) {
-				return typ
+			if typ_source_id := bindings.type_id(node.value) {
+				return typ_source_id
 			}
 			index.read('g:', node.value)
-			if typ := index.globals.get(node.value) {
-				return typ
+			if typ_source_id := index.globals.type_id(node.value) {
+				return typ_source_id
 			}
 			index.read('f:', node.value)
 			index.read('e:', node.value)
 			if node.value in index.fields || node.value in index.enum_fields {
-				return node.value
+				return flat.source_type_id(node.value)
 			}
-			return ''
+			return u32(0)
 		}
 		.string_literal {
-			return 'string'
+			return flat.source_type_string
 		}
 		.int_literal {
-			return 'int'
+			return flat.source_type_int
 		}
 		.float_literal {
-			return 'f64'
+			return flat.source_type_f64
 		}
 		.bool_literal {
-			return 'bool'
+			return flat.source_type_bool
 		}
 		.char_literal {
-			return 'u8'
+			return flat.source_type_u8
 		}
 		.array_literal, .array_init {
 			if node.children_count == 0 {
-				return '[]void'
+				return flat.source_type_id('[]void')
 			}
-			elem_type := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
-			if elem_type.len > 0 {
-				return '[]${elem_type}'
+			elem_type_source_id := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
+			elem_type := flat.source_type_name(elem_type_source_id)
+			if elem_type_source_id != 0 {
+				return flat.source_type_id('[]${elem_type}')
 			}
-			return '[]void'
+			return flat.source_type_id('[]void')
 		}
 		.map_init {
-			return if node.typ_text().len > 0 { node.typ_text() } else { 'map[void]void' }
+			return if node.typ != 0 { node.typ } else { flat.source_type_id('map[void]void') }
 		}
 		.struct_init {
-			return implicit_normalize_type(node.value, index)
+			return implicit_normalize_type(flat.source_type_id(node.value), index)
 		}
 		.paren, .expr_stmt, .postfix {
 			if node.children_count == 1 {
@@ -22138,19 +22289,19 @@ fn implicit_expr_type(a &flat.FlatAst, id flat.NodeId, bindings flat.TypeTextBin
 		}
 		.if_expr {
 			if node.children_count < 3 {
-				return ''
+				return u32(0)
 			}
-			mut typ := ''
+			mut typ := u32(0)
 			for child_idx in 1 .. node.children_count {
 				branch_id := a.child(node, child_idx)
-				branch_type := implicit_expr_type(a, branch_id, bindings, index, depth + 1)
-				if branch_type == '' {
-					return ''
+				branch_type_source_id := implicit_expr_type(a, branch_id, bindings, index, depth + 1)
+				if branch_type_source_id == u32(0) {
+					return u32(0)
 				}
-				if typ == '' {
-					typ = branch_type
-				} else if implicit_normalize_type(typ, index) != implicit_normalize_type(branch_type, index) {
-					return ''
+				if typ == 0 {
+					typ = branch_type_source_id
+				} else if implicit_normalize_type(typ, index) != implicit_normalize_type(branch_type_source_id, index) {
+					return u32(0)
 				}
 			}
 			return typ
@@ -22165,101 +22316,103 @@ fn implicit_expr_type(a &flat.FlatAst, id flat.NodeId, bindings flat.TypeTextBin
 			// Only string concatenation: `+` on strings is never overloaded.
 			if node.op == .plus && node.children_count == 2 {
 				for child_idx in 0 .. 2 {
-					if implicit_expr_type(a, a.child(node, child_idx), bindings, index, depth + 1) == 'string' {
-						return 'string'
+					if implicit_expr_type(a, a.child(node, child_idx), bindings, index, depth + 1) == flat.source_type_string {
+						return flat.source_type_string
 					}
 				}
 			}
 			// And arithmetic on two numbers of one type, which is a number of that
 			// type: an alias of it that overloads the operator has to return itself.
 			if node.op in [.plus, .minus, .mul, .div, .mod] && node.children_count == 2 {
-				left := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
-				if left in implicit_number_types
-					&& implicit_expr_type(a, a.child(node, 1), bindings, index, depth + 1) == left {
-					return left
+				left_source_id := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
+				if left_source_id in implicit_number_types
+					&& implicit_expr_type(a, a.child(node, 1), bindings, index, depth + 1) == left_source_id {
+					return left_source_id
 				}
 			}
 		}
 		.prefix {
 			// `-n` is a number of the type of `n`.
 			if node.op == .minus && node.children_count == 1 {
-				typ := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
-				if typ in implicit_number_types {
-					return typ
+				typ_source_id_2 := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
+				if typ_source_id_2 in implicit_number_types {
+					return typ_source_id_2
 				}
 			}
 		}
 		.selector {
 			if node.children_count > 0 {
-				base_type := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
-				return implicit_field_type(base_type, node.value, index)
+				base_type_source_id := implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1)
+
+				return implicit_field_type(base_type_source_id, node.value, index)
 			}
 		}
 		.index {
 			if node.children_count > 0 {
-				base_type := implicit_normalize_type(implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1), index)
+				base_type_source_id_3 := implicit_normalize_type(implicit_expr_type(a, a.child(node, 0), bindings, index, depth + 1), index)
+				base_type := flat.source_type_name(base_type_source_id_3)
 				if node.value == 'range' {
 					// A slice keeps its base type: `s[..n]` is a string, and slicing a
 					// fixed array yields a dynamic one.
-					if base_type == 'string' || base_type.starts_with('[]') {
-						return base_type
+					if base_type_source_id_3 == flat.source_type_string || base_type.starts_with('[]') {
+						return base_type_source_id_3
 					}
 					if base_type.starts_with('[') {
-						close := base_type.index(']') or { return '' }
+						close := base_type.index(']') or { return u32(0) }
 						if close + 1 < base_type.len {
-							return '[]' + base_type[close + 1..]
+							return flat.source_type_id('[]' + base_type[close + 1..])
 						}
 					}
-					return ''
+					return u32(0)
 				}
 				if base_type.starts_with('[]') {
-					return base_type[2..]
+					return flat.source_type_id(base_type[2..])
 				}
 				if base_type.starts_with('[') {
-					close := base_type.index(']') or { return '' }
+					close := base_type.index(']') or { return u32(0) }
 					if close + 1 < base_type.len {
-						return base_type[close + 1..]
+						return flat.source_type_id(base_type[close + 1..])
 					}
 				}
-				if base_type == 'string' {
-					return 'u8'
+				if base_type_source_id_3 == flat.source_type_string {
+					return flat.source_type_u8
 				}
 			}
 		}
 		.cast_expr, .as_expr {
-			if node.typ_text().len > 0 {
-				return implicit_normalize_type(node.typ_text(), index)
+			if node.typ != 0 {
+				return implicit_normalize_type(node.typ, index)
 			}
 			if node.value.len > 0 {
-				return implicit_normalize_type(node.value, index)
+				return implicit_normalize_type(flat.source_type_id(node.value), index)
 			}
 		}
 		else {}
 	}
 
-	return ''
+	return u32(0)
 }
 
 // implicit_match_type types a `match` used as a value like an `if`: every branch value
 // must have the same type. A branch that yields the matched variable under a single
 // struct type pattern yields it smartcast to that type.
-fn implicit_match_type(a &flat.FlatAst, node &flat.Node, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) string {
+fn implicit_match_type(a &flat.FlatAst, node &flat.Node, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) u32 {
 	if node.children_count < 2 {
-		return ''
+		return u32(0)
 	}
 	subject := a.child_node(node, 0)
-	mut typ := ''
+	mut typ := u32(0)
 	for child_idx in 1 .. node.children_count {
 		branch := a.child_node(node, child_idx)
 		if branch.kind != .match_branch {
-			return ''
+			return u32(0)
 		}
 		n_conds := if branch.value == 'else' { 0 } else { branch.value.int() }
 		if branch.children_count <= n_conds {
-			return ''
+			return u32(0)
 		}
 		value_id := a.child(branch, branch.children_count - 1)
-		mut branch_type := ''
+		mut branch_type := u32(0)
 		if n_conds == 1 && subject.kind == .ident {
 			mut value := a.node(value_id)
 			for value.kind in [.expr_stmt, .paren] && value.children_count == 1 {
@@ -22269,127 +22422,139 @@ fn implicit_match_type(a &flat.FlatAst, node &flat.Node, bindings flat.TypeTextB
 			if value.kind == .ident && value.value == subject.value && cond.kind == .ident {
 				index.read('f:', cond.value)
 				if cond.value in index.fields {
-					branch_type = cond.value
+					branch_type = flat.source_type_id(cond.value)
 				}
 			}
 		}
-		if branch_type == '' {
+		if branch_type == 0 {
 			branch_type = implicit_expr_type(a, value_id, bindings, index, depth + 1)
 		}
-		if branch_type == '' {
-			return ''
+		if branch_type == 0 {
+			return u32(0)
 		}
-		if typ == '' {
+		if typ == 0 {
 			typ = branch_type
 		} else if implicit_normalize_type(typ, index) != implicit_normalize_type(branch_type, index) {
-			return ''
+			return u32(0)
 		}
 	}
 	return typ
 }
 
-fn implicit_call_return_type(a &flat.FlatAst, call &flat.Node, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) string {
+fn implicit_call_return_type(a &flat.FlatAst, call &flat.Node, bindings flat.TypeTextBindings, index ImplicitFieldScanIndex, depth int) u32 {
 	if call.children_count == 0 {
-		return ''
+		return u32(0)
 	}
 	callee := a.child_node(call, 0)
 	if callee.kind == .ident {
 		index.read('r:', callee.value)
-		if typ := index.fn_returns.get(callee.value) {
-			return implicit_normalize_type(typ, index)
+		if typ_source_id := index.fn_returns.type_id(callee.value) {
+			return implicit_normalize_type(typ_source_id, index)
 		}
-		return ''
+		return u32(0)
 	}
 	if callee.kind != .selector || callee.children_count == 0 {
-		return ''
+		return u32(0)
 	}
 	base_id := a.child(callee, 0)
-	base_type := implicit_normalize_type(implicit_expr_type(a, base_id, bindings, index, depth + 1), index)
-	if base_type == 'string' {
+	base_type_source_id_4 := implicit_normalize_type(implicit_expr_type(a, base_id, bindings, index, depth + 1), index)
+	base_type := flat.source_type_name(base_type_source_id_4)
+	if base_type_source_id_4 == flat.source_type_string {
 		if callee.value == 'runes' {
-			return '[]rune'
+			return flat.source_type_id('[]rune')
 		}
 		if callee.value == 'bytes' {
-			return '[]u8'
+			return flat.source_type_id('[]u8')
 		}
 	}
-	if base_type.len > 0 {
+	if base_type_source_id_4 != 0 {
 		for key in ['${base_type}.${callee.value}', '${base_type.all_after_last('.')}.${callee.value}'] {
 			index.read('r:', key)
-			if typ := index.fn_returns.get(key) {
-				return implicit_normalize_type(typ, index)
+			if typ_source_id := index.fn_returns.type_id(key) {
+				return implicit_normalize_type(typ_source_id, index)
 			}
 		}
 	}
-	return ''
+	return u32(0)
 }
 
-fn implicit_type_has_field(raw_type string, field string, index ImplicitFieldScanIndex) bool {
-	return implicit_field_type(raw_type, field, index) != ''
+fn implicit_type_has_field(raw_type_id u32, field string, index ImplicitFieldScanIndex) bool {
+	return implicit_field_type(raw_type_id, field, index) != u32(0)
 }
 
-fn implicit_field_type(raw_type string, field string, index ImplicitFieldScanIndex) string {
-	typ := implicit_normalize_type(raw_type, index)
-	if typ == '' {
-		return ''
+fn implicit_field_type(raw_type_id u32, field string, index ImplicitFieldScanIndex) u32 {
+	typ := implicit_normalize_type(raw_type_id, index)
+	if typ == 0 {
+		return 0
 	}
-	if typ == 'string' {
+	if typ == flat.source_type_string {
 		return match field {
-			'len', 'flags', 'is_lit' { 'int' }
-			'str' { '&u8' }
-			else { '' }
+			'len', 'flags', 'is_lit' { flat.source_type_int }
+			'str' { flat.source_type_id('&u8') }
+			else { u32(0) }
 		}
 	}
-	if typ.starts_with('[]') || typ.starts_with('...')
-		|| (typ.starts_with('[') && typ.contains(']')) {
+	shape := flat.source_type_shape(typ)
+	if shape.has(.array_type) || shape.has(.variadic)
+		|| (shape.has(.leading_bracket) && flat.source_type_name(typ).contains(']')) {
 		return match field {
-			'len', 'cap', 'offset', 'flags', 'element_size' { 'int' }
-			'data' { 'voidptr' }
-			else { '' }
+			'len', 'cap', 'offset', 'flags', 'element_size' { flat.source_type_int }
+			'data' { flat.source_type_voidptr }
+			else { u32(0) }
 		}
 	}
-	if typ.starts_with('map[') {
+	if shape.has(.map_type) {
 		return match field {
-			'len', 'cap' { 'int' }
-			else { '' }
+			'len', 'cap' { flat.source_type_int }
+			else { u32(0) }
 		}
 	}
-	index.read('f:', typ)
-	if declared := index.fields[typ] {
-		if field_type := declared.get(field) {
+	name := flat.source_type_name(typ)
+	index.read('f:', name)
+	if declared := index.fields[name] {
+		if field_type := declared.type_id(field) {
 			return implicit_normalize_type(field_type, index)
 		}
 	}
-	return ''
+	return 0
 }
 
 const implicit_type_prefixes = ['mut ', 'shared ', '&', '?', '!']
 
 // implicit_number_types are the types of numbers, as implicit_normalize_type
 // leaves them.
-const implicit_number_types = ['int', 'i8', 'i16', 'i32', 'i64', 'isize', 'u8', 'u16', 'u32', 'u64',
-	'usize', 'f32', 'f64']
+const implicit_number_types = [flat.source_type_int, flat.source_type_i8, flat.source_type_i16,
+	flat.source_type_i32, flat.source_type_i64, flat.source_type_isize, flat.source_type_u8,
+	flat.source_type_u16, flat.source_type_u32, flat.source_type_u64, flat.source_type_usize,
+	flat.source_type_f32, flat.source_type_f64]
 
-fn implicit_normalize_type(raw string, index ImplicitFieldScanIndex) string {
+fn implicit_normalize_type(raw_id u32, index ImplicitFieldScanIndex) u32 {
+	raw := flat.source_type_name(raw_id)
 	mut typ := implicit_trim_space(raw)
+	mut normalized_id := raw_id
+	mut has_normalized_id := typ == raw
 	for _ in 0 .. 12 {
 		mut changed := false
 		for prefix in implicit_type_prefixes {
 			if typ.starts_with(prefix) {
 				typ = implicit_trim_space(typ[prefix.len..])
+				has_normalized_id = false
 				changed = true
 			}
 		}
 		index.read('a:', typ)
-		if target := index.aliases.get(typ) {
+		if target_id := index.aliases.type_id(typ) {
+			target := flat.source_type_name(target_id)
 			typ = implicit_trim_space(target)
+			normalized_id = target_id
+			has_normalized_id = typ == target
 			changed = true
 		}
 		if !changed {
 			break
 		}
 	}
-	return typ
+	return if has_normalized_id { normalized_id } else { flat.source_type_id(typ) }
 }
 
 // implicit_trim_space is `text.trim_space()` without the copy of a text that
@@ -22402,7 +22567,12 @@ fn implicit_trim_space(text string) string {
 	return text.trim_space()
 }
 
-fn type_text_is_channel(typ string) bool {
+fn type_text_is_channel(typ_id u32) bool {
+	return type_text_is_channel_bytes(flat.source_type_name(typ_id))
+}
+
+// type_text_is_channel_bytes inspects spelling syntax within the numeric predicate boundary.
+fn type_text_is_channel_bytes(typ string) bool {
 	mut clean := implicit_trim_space(typ)
 	for {
 		if clean.starts_with('&') {
@@ -22418,7 +22588,12 @@ fn type_text_is_channel(typ string) bool {
 	return clean.starts_with('chan ') || clean == 'chan'
 }
 
-fn type_text_is_shared(raw string) bool {
+fn type_text_is_shared(raw_id u32) bool {
+	return type_text_is_shared_bytes(flat.source_type_name(raw_id))
+}
+
+// type_text_is_shared_bytes inspects spelling syntax within the numeric predicate boundary.
+fn type_text_is_shared_bytes(raw string) bool {
 	return implicit_trim_space(raw).starts_with('shared ')
 }
 
@@ -22701,18 +22876,28 @@ fn rerun_as_one_shot_check_with(reason string, question string, extra_args []str
 		// Before the input, which the command line ends with.
 		args.insert(args.len - 1, ['-line-info', question])
 	}
-	mut envs := []string{}
-	for name, value in os.environ() {
-		if name in ['V_DIAGNOSTICS_SERVER', 'V_DIAGNOSTICS_PREPARE'] {
-			continue
-		}
-		envs << '${name}=${value}'
-	}
 	flush_stdout()
 	flush_stderr()
-	os.execve(os.executable(), args, envs) or {
-		eprintln('v-diagnostics-server: cannot run the one-shot check: ${err}')
-		exit(2)
+	$if windows {
+		// Windows has no exec: os.execve would start the one-shot check and exit this
+		// process with status 0 before the check finishes. Forward its status instead,
+		// as restart_v3_with_args does. The child inherits this environment.
+		for name in ['V_DIAGNOSTICS_SERVER', 'V_DIAGNOSTICS_PREPARE'] {
+			os.unsetenv(name)
+		}
+		exit(os.system_args([os.executable(), ...args]))
+	} $else {
+		mut envs := []string{}
+		for name, value in os.environ() {
+			if name in ['V_DIAGNOSTICS_SERVER', 'V_DIAGNOSTICS_PREPARE'] {
+				continue
+			}
+			envs << '${name}=${value}'
+		}
+		os.execve(os.executable(), args, envs) or {
+			eprintln('v-diagnostics-server: cannot run the one-shot check: ${err}')
+			exit(2)
+		}
 	}
 }
 
