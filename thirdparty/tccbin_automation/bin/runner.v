@@ -107,7 +107,7 @@ pub fn evaluate_staged_manifest_for_execution(automation_root string, manifest_p
 }
 
 fn validate_runtime_contract_binding(runtime RuntimeContractBinding) ! {
-	if runtime.repository !in ['GGRei/v', 'vlang/v'] {
+	if runtime.repository !in ['GGRei/v', 'vlang/v', 'quaesitor-scientiam/v'] {
 		return error('runtime contract repository is not allowlisted')
 	}
 	if !is_lower_hex_40(runtime.sha) {
