@@ -1,0 +1,62 @@
+name: tccbin deferred reproducibility (fork test, do not merge)
+
+# Fork-only check. Rebuilds the baseline TinyCC commit recorded by the
+# vlang/tccbin thirdparty-linux-amd64 branch through the deferred-commit path,
+# then compares the staged tcc.exe digest with the baseline manifest. Nothing
+# is committed, pushed, or published.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deferred-repro:
+    runs-on: [self-hosted, linux, x64, tccbin]
+    timeout-minutes: 60
+    env:
+      TCC_COMMIT: 85ba3ae8f1e22044255d54c28be04e5fc3e88ae0
+      BASELINE_TCC_EXE_SHA256: d30e38192a33f88495f69b54bc7b395e6c3c3b087ce4cb0999e6870c12654461
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Clone and pin TinyCC
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/tinycc-ref
+          git clone --quiet https://repo.or.cz/tinycc.git /tmp/tinycc-ref
+          git -C /tmp/tinycc-ref checkout --quiet "$TCC_COMMIT"
+          test "$(git -C /tmp/tinycc-ref rev-parse HEAD)" = "$TCC_COMMIT"
+
+      - name: Build TinyCC through the deferred-commit path
+        env:
+          TCC_REPO: /tmp/tinycc-ref
+          TCC_FOLDER: thirdparty/tcc
+          TCCBIN_DEFER_COMMIT: '1'
+          TCCBIN_STAGE_ROOT: ${{ runner.temp }}/tccbin-stage
+        run: |
+          set -euo pipefail
+          mkdir -p thirdparty/tcc
+          BUILD_CMD="TCC_COMMIT=$TCC_COMMIT TCC_FOLDER=thirdparty/tcc TCCBIN_DEFER_COMMIT=1 bash thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh" \
+            bash thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh
+
+      - name: Compare the staged tcc.exe with the baseline digest
+        run: |
+          set -euo pipefail
+          staged="$TCCBIN_STAGE_ROOT/tcc.exe"
+          test -f "$staged"
+          actual="$(sha256sum "$staged" | cut -d' ' -f1)"
+          echo "staged tcc.exe sha256: $actual"
+          echo "baseline tcc.exe sha256: $BASELINE_TCC_EXE_SHA256"
+          if [ "$actual" = "$BASELINE_TCC_EXE_SHA256" ]; then
+            echo "REPRODUCED: staged tcc.exe matches the baseline digest"
+          else
+            echo "DIFFERS: staged tcc.exe does not match the baseline digest"
+            exit 1
+          fi
+        env:
+          TCCBIN_STAGE_ROOT: ${{ runner.temp }}/tccbin-stage
