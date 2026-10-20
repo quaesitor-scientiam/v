@@ -27,7 +27,7 @@ vc_root_input=$4
 work_root_input=$5
 
 case "$contract_repository" in
-	GGRei/v | vlang/v) ;;
+	GGRei/v | vlang/v | quaesitor-scientiam/v) ;;
 	*) die 'contract repository is not allowlisted' ;;
 esac
 [[ "$contract_sha" =~ ^[0-9a-f]{40}$ ]] || die 'contract SHA must be a full lowercase commit SHA'
