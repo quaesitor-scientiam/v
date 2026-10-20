@@ -65,7 +65,7 @@ concurrency:
 
 jobs:
   control:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, tccbin]
     timeout-minutes: 120
     outputs:
       target: ${{ steps.control.outputs.target }}
@@ -210,7 +210,7 @@ jobs:
 
           case "$target" in
             linux-amd64)
-              hosted_matrix='{"include":[{"id":"linux-amd64","publish_unlock_variable":"TCCBIN_LINUX_AMD64_PUBLISH_UNLOCKED","os":"ubuntu-latest","branch":"thirdparty-linux-amd64","script":"thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh"}]}'
+              hosted_matrix='{"include":[{"id":"linux-amd64","publish_unlock_variable":"TCCBIN_LINUX_AMD64_PUBLISH_UNLOCKED","os":["self-hosted","linux","x64","tccbin"],"branch":"thirdparty-linux-amd64","script":"thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh"}]}'
               has_hosted=true
               ;;
             macos-amd64)
@@ -230,7 +230,7 @@ jobs:
               has_bsd=true
               ;;
             all)
-              hosted_matrix='{"include":[{"id":"linux-amd64","publish_unlock_variable":"TCCBIN_LINUX_AMD64_PUBLISH_UNLOCKED","os":"ubuntu-latest","branch":"thirdparty-linux-amd64","script":"thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh"},{"id":"macos-amd64","publish_unlock_variable":"TCCBIN_MACOS_AMD64_PUBLISH_UNLOCKED","os":"macos-15-intel","branch":"thirdparty-macos-amd64","script":"thirdparty/build_scripts/thirdparty-macos-amd64_tcc.sh"},{"id":"macos-arm64","publish_unlock_variable":"TCCBIN_MACOS_ARM64_PUBLISH_UNLOCKED","os":"macos-latest","branch":"thirdparty-macos-arm64","script":"thirdparty/build_scripts/thirdparty-macos-arm64_tcc.sh"}]}'
+              hosted_matrix='{"include":[{"id":"linux-amd64","publish_unlock_variable":"TCCBIN_LINUX_AMD64_PUBLISH_UNLOCKED","os":["self-hosted","linux","x64","tccbin"],"branch":"thirdparty-linux-amd64","script":"thirdparty/build_scripts/thirdparty-linux-amd64_tcc.sh"},{"id":"macos-amd64","publish_unlock_variable":"TCCBIN_MACOS_AMD64_PUBLISH_UNLOCKED","os":"macos-15-intel","branch":"thirdparty-macos-amd64","script":"thirdparty/build_scripts/thirdparty-macos-amd64_tcc.sh"},{"id":"macos-arm64","publish_unlock_variable":"TCCBIN_MACOS_ARM64_PUBLISH_UNLOCKED","os":"macos-latest","branch":"thirdparty-macos-arm64","script":"thirdparty/build_scripts/thirdparty-macos-arm64_tcc.sh"}]}'
               bsd_matrix='{"include":[{"id":"freebsd-amd64","publish_unlock_variable":"TCCBIN_FREEBSD_AMD64_PUBLISH_UNLOCKED","operating_system":"freebsd","version":"15.1","branch":"thirdparty-freebsd-amd64","script":"thirdparty/build_scripts/thirdparty-freebsd-amd64_tcc.sh","install":"sudo pkg install -y bash git gmake rsync","cc":"cc"},{"id":"openbsd-amd64","publish_unlock_variable":"TCCBIN_OPENBSD_AMD64_PUBLISH_UNLOCKED","operating_system":"openbsd","version":"7.8","branch":"thirdparty-openbsd-amd64","script":"thirdparty/build_scripts/thirdparty-openbsd-amd64_tcc.sh","install":"sudo pkg_add bash git gmake rsync","cc":"clang"}]}'
               has_hosted=true
               has_bsd=true
@@ -264,7 +264,7 @@ jobs:
   phase-a-dark-mode:
     needs: control
     if: needs.control.outputs.phase_a_dark_mode == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, x64, tccbin]
     timeout-minutes: 30
     steps:
       - name: Checkout the trusted workflow revision
@@ -289,7 +289,7 @@ jobs:
   resolve-sources:
     needs: control
     if: needs.control.outputs.has_hosted == 'true' || needs.control.outputs.has_bsd == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, tccbin]
     timeout-minutes: 120
     outputs:
       tinycc_hash: ${{ steps.tinycc.outputs.hash }}
@@ -1718,7 +1718,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.control.outputs.bsd_matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, tccbin]
     env:
       TARGET: ${{ needs.control.outputs.target }}
       TCC_COMMIT: ${{ needs.resolve-sources.outputs.tinycc_hash }}
