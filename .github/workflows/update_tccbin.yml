@@ -399,7 +399,7 @@ jobs:
         with:
           repository: vlang/vc
           ref: c3063f8ca58150f6c6d98d86dc95bd3543e620f3
-          path: ../tccbin-vc-cache/vlang-vc
+          path: .tccbin-bootstrap-vc
           fetch-depth: 0
           persist-credentials: false
 
@@ -436,7 +436,7 @@ jobs:
           set -euo pipefail
           contract_input="$RUNNER_TEMP/tccbin-validator-contract-input"
           validator_work="$RUNNER_TEMP/tccbin-validator-work"
-          vc_root="$GITHUB_WORKSPACE/../tccbin-vc-cache/vlang-vc"
+          vc_root="$GITHUB_WORKSPACE/.tccbin-bootstrap-vc"
           test ! -e "$contract_input"
           test ! -e "$validator_work"
           git -c protocol.file.allow=always clone --quiet --no-checkout --no-local \
