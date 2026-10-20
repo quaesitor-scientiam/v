@@ -135,7 +135,7 @@ jobs:
           # commit may change the workflow_dispatch repository literal;
           # the independent push guards below must remain vlang/v-only.
           case "$EVENT_NAME:$GITHUB_REPOSITORY" in
-            workflow_dispatch:vlang/v)
+            workflow_dispatch:quaesitor-scientiam/v)
               ;;
             schedule:vlang/v)
               if [ "$GITHUB_REF" != 'refs/heads/master' ]; then
