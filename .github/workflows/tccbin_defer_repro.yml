@@ -6,6 +6,8 @@ name: tccbin deferred reproducibility (fork test, do not merge)
 # is committed, pushed, or published.
 
 on:
+  push:
+    branches: [tccbin-selfhosted]
   workflow_dispatch:
 
 permissions:
