@@ -16,11 +16,12 @@ fn fastc_match_common_numeric_variant(variants []u32) u32 {
 }
 
 fn fastc_match_multi_variant_value(subject string, access string, variants []u32, common_type u32) string {
-	common_name := flat.source_type_name(common_type)
+	common_name := fastc_output_c_type(flat.source_type_name(common_type))
 	mut source := '((${common_name})0)'
 	for i := variants.len - 1; i >= 0; i-- {
 		variant := flat.source_type_name(variants[i])
-		source = '((${subject}${access}_typ == __v_typeid_${variant}) ? ((${common_name})(*(${variant} *)${subject}${access}_object)) : (${source}))'
+		variant_c_type := fastc_output_c_type(variant)
+		source = '((${subject}${access}_typ == __v_typeid_${variant}) ? ((${common_name})(*(${variant_c_type} *)${subject}${access}_object)) : (${source}))'
 	}
 	return source
 }
@@ -40,12 +41,16 @@ fn (mut g Parser) read_match_expression() !string {
 		return g.unsupported('unverifiable match expression subject')
 	}
 	subject_tokens := g.last_expression.clone()
-	smartcast_is_reference := subject_is_mut || flat.source_type_name(subject_type).ends_with('*')
+	smartcast_is_reference := subject_is_mut || flat.source_type_query(subject_type).has(.c_pointer_suffix)
 	// A sum-type / interface subject dispatches on the boxed `_typ` tag; each branch
 	// names a variant type and (for a plain-local subject) is smart-cast inside its
 	// value expression.
 	is_boxed := g.is_boxed_type(fastc_normalize_inferred_type(subject_type_source_id))
-	boxed_access := if flat.source_type_name(subject_type).ends_with('*') { '->' } else { '.' }
+	boxed_access := if flat.source_type_query(subject_type).has(.c_pointer_suffix) {
+		'->'
+	} else {
+		'.'
+	}
 	mut subject_local := ''
 	if is_boxed && subject_tokens.len == 1 && subject_tokens[0].tok == .name && subject_tokens[0].lit in g.locals {
 		subject_local = subject_tokens[0].lit
@@ -69,6 +74,15 @@ fn (mut g Parser) read_match_expression() !string {
 		if path := fastc_member_chain_path(subject_tokens, member_start, subject_tokens.len) {
 			subject_member_path = path
 		}
+	}
+	// The boxed member itself, which an assignment to the narrowed member writes.
+	mut subject_member_source := ''
+	mut subject_member_type := u32(0)
+	if subject_member_path.contains('.') {
+		subject_member_source = g.render_member_receiver(subject_tokens[member_start..]) or { '' }
+		subject_member_type = fastc_normalize_inferred_type(g.infer_expression_type(subject_tokens[member_start..]) or {
+			u32(0)
+		})
 	}
 	g.expect(.lcbr)!
 	temporary := g.temporary_name('match')
@@ -129,7 +143,7 @@ fn (mut g Parser) read_match_expression() !string {
 					case_source = '${start}..${finish}'
 					branch_conditions << '((${temporary}) >= (${start}) && (${temporary}) <= (${finish}))'
 				} else {
-					branch_conditions << if flat.source_type_name(g.underlying_alias_type(subject_type_source_id)).trim_right('*') == 'string' {
+					branch_conditions << if fastc_trim_pointer_type(g.underlying_alias_type(subject_type_source_id)) == flat.source_type_string {
 						'builtin__string_eq(${temporary}, ${start})'
 					} else {
 						'((${temporary}) == (${start}))'
@@ -196,16 +210,27 @@ fn (mut g Parser) read_match_expression() !string {
 			member_smartcast_saved = g.member_smartcasts[projection_path] or {
 				FastcMemberSmartcast{}
 			}
+			pointer := '((${fastc_output_c_type(flat.source_type_name(smartcast_type))} *)${temporary}${boxed_access}_object)'
+			mut view_type, mut view_source := g.narrowed_member_view(smartcast_type, u32(0),
+				pointer)
+			if common_numeric_type != 0 {
+				// Numeric variants of different widths are read as their common type.
+				view_type = common_numeric_type
+				view_source = fastc_match_multi_variant_value(temporary, boxed_access,
+					branch_variants, common_numeric_type)
+			}
 			g.member_smartcasts[projection_path] = FastcMemberSmartcast{
-				typ:           flat.source_type_id(flat.source_type_name(smartcast_type) + '*')
-				source:        '((${flat.source_type_name(smartcast_type)} *)${temporary}${boxed_access}_object)'
-				variants:      if multi_struct_smartcast {
+				typ:            view_type
+				source:         view_source
+				variants:       if multi_struct_smartcast {
 					flat.TypeTextList{ ids: branch_variants.clone() }
 				} else {
 					flat.TypeTextList{}
 				}
-				tag_source:    '${temporary}${boxed_access}_typ'
-				object_source: '${temporary}${boxed_access}_object'
+				tag_source:     '${temporary}${boxed_access}_typ'
+				object_source:  '${temporary}${boxed_access}_object'
+				subject_source: subject_member_source
+				subject_type:   subject_member_type
 			}
 		}
 		mut value := g.read_match_block_expression_value()!
@@ -219,21 +244,23 @@ fn (mut g Parser) read_match_expression() !string {
 		}
 		if smartcast_active {
 			g.locals[subject_local] = smartcast_saved
+			// The payload is boxed as its C output type (a V `int` is 64 bits wide).
+			smartcast_c_type := fastc_output_c_type(flat.source_type_name(smartcast_type))
 			smartcast_value := if smartcast_is_reference {
-				'(${flat.source_type_name(smartcast_type)} *)${temporary}${boxed_access}_object'
+				'(${smartcast_c_type} *)${temporary}${boxed_access}_object'
 			} else if common_numeric_type != 0 {
 				fastc_match_multi_variant_value(temporary, boxed_access, branch_variants, common_numeric_type)
 			} else {
-				'*(${flat.source_type_name(smartcast_type)} *)${temporary}${boxed_access}_object'
+				'*(${smartcast_c_type} *)${temporary}${boxed_access}_object'
 			}
 			declaration_type := if smartcast_is_reference {
-				flat.source_type_name(smartcast_type) + '*'
+				smartcast_c_type + '*'
 			} else {
-				flat.source_type_name(smartcast_type)
+				smartcast_c_type
 			}
 			value = '({ ${declaration_type} ${fastc_c_identifier(subject_local)} = ${smartcast_value}; (${value}); })'
 		}
-		if g.selfhost && flat.source_type_name(value_type) != '' && outer_expected_type_source_id != u32(0) && g.should_box_variant(outer_expected_type, value_type) {
+		if g.selfhost && value_type != u32(0) && outer_expected_type_source_id != u32(0) && g.should_box_variant(outer_expected_type, value_type) {
 			// A branch value whose type is a variant of the match's (boxed) expected
 			// type must be boxed, so every branch shares the ternary's result type
 			// (e.g. a `[]Primitive` branch returning the smart-cast array as a `Primitive`).
@@ -246,22 +273,25 @@ fn (mut g Parser) read_match_expression() !string {
 		}
 		g.expect(.rcbr)!
 		g.skip_semicolons()
-		if g.selfhost && flat.source_type_name(value_type).trim_right('*') == 'IError' && g.return_type_text() == '__v_result' {
+		if g.selfhost && fastc_trim_pointer_type(value_type) == fastc_type_ierror && g.return_type == fastc_type_result {
 			error_result_type := (if result_type != 0 { result_type } else { outer_expected_type })
-			if error_result_type != 0 && flat.source_type_name(error_result_type) !in [
-				'Option',
-				'__v_result',
-			] {
+			if error_result_type != 0 && error_result_type !in [fastc_type_option, fastc_type_result] {
 				value = '({ return (__v_result){.err=${value}, .state=1}; (${flat.source_type_name(fastc_normalize_inferred_type(error_result_type))}){0}; })'
 				value_type = error_result_type
 			}
 		}
-		if g.selfhost && flat.source_type_name(result_type) in ['Option', '__v_result'] && flat.source_type_name(value_type) !in ['',
-			'Option', '__v_result'] {
+		if g.selfhost && result_type in [fastc_type_option, fastc_type_result] && value_type !in [
+			u32(0),
+			fastc_type_option,
+			fastc_type_result,
+		] {
 			value = g.option_success_expression(result_type, value_type, value)
 			value_type = result_type
-		} else if g.selfhost && flat.source_type_name(value_type) in ['Option', '__v_result'] && flat.source_type_name(result_type) !in ['',
-			'Option', '__v_result'] {
+		} else if g.selfhost && value_type in [fastc_type_option, fastc_type_result] && result_type !in [
+			u32(0),
+			fastc_type_option,
+			fastc_type_result,
+		] {
 			for i, previous_value in values {
 				values[i] = g.option_success_expression(value_type, result_type, previous_value)
 			}
@@ -270,7 +300,7 @@ fn (mut g Parser) read_match_expression() !string {
 			}
 			result_type = value_type
 		}
-		if g.selfhost && flat.source_type_name(value_type) in ['', 'void'] && result_type != 0 {
+		if g.selfhost && value_type in [u32(0), flat.source_type_void] && result_type != 0 {
 			// A diverging arm (a `@[noreturn]` call such as `eprintln_exit(...)`) yields no
 			// usable value; run it, then fall through to a zeroed result so the branch still
 			// matches the ternary's result type.
@@ -278,7 +308,7 @@ fn (mut g Parser) read_match_expression() !string {
 			value = '({ (void)(${value}); (${flat.source_type_name(zero_type)}){0}; })'
 			value_type = result_type
 		}
-		if result_type == 0 && flat.source_type_name(value_type) !in ['', 'void'] {
+		if result_type == 0 && value_type !in [u32(0), flat.source_type_void] {
 			if g.selfhost {
 				zero_type := fastc_normalize_inferred_type(value_type)
 				for i, previous_value in values {
@@ -386,7 +416,7 @@ fn (mut g Parser) read_block_expression_value() !string {
 			return first
 		}
 		mut values := [first]
-		mut value_types := flat.TypeTextList.from_names([flat.source_type_name(fastc_normalize_inferred_type(g.last_expression_type))]).ids
+		mut value_types := [fastc_normalize_inferred_type(g.last_expression_type)]
 		for g.tok == .comma {
 			g.next()
 			values << g.read_expression([token.Token.comma, token.Token.semicolon, token.Token.rcbr])!
@@ -441,7 +471,7 @@ fn (mut g Parser) read_block_expression_value() !string {
 		// compressed-static match): pack the comma-separated values into a MultiReturn,
 		// mirroring the single-line branch path above.
 		mut values := [value]
-		mut value_types := flat.TypeTextList.from_names([flat.source_type_name(fastc_normalize_inferred_type(g.last_expression_type))]).ids
+		mut value_types := [fastc_normalize_inferred_type(g.last_expression_type)]
 		for g.tok == .comma {
 			g.next()
 			part := if g.tok == .name {

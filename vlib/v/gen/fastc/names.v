@@ -123,9 +123,17 @@ fn (g &Parser) unqualified_function_key(name string) string {
 	local_key := fastc_function_key(g.module_name, name)
 	mut key := local_key
 	if local_key !in g.functions && local_key !in g.mono_functions {
-		builtin_key := fastc_function_key('builtin', name)
-		if builtin_key in g.functions {
-			key = builtin_key
+		if imported_module := g.imports[fastc_selective_import_key(name)] {
+			selected_key := fastc_function_key(g.resolve_module_alias(imported_module), name)
+			if selected_key in g.functions || selected_key in g.mono_functions {
+				key = selected_key
+			}
+		}
+		if key == local_key {
+			builtin_key := fastc_function_key('builtin', name)
+			if builtin_key in g.functions {
+				key = builtin_key
+			}
 		}
 	}
 	mut w := unsafe { &Parser(g) }
@@ -138,7 +146,18 @@ fn (g &Parser) unqualified_function_key(name string) string {
 // site. The mapping does not depend on the parser's context, so the memo
 // is never reset.
 fn (g &Parser) c_function_name_for_key(key string) string {
+	if cached := g.c_function_name_memo[key] {
+		return cached
+	}
 	return g.c_function_name_or(key, fastc_c_function_name_for_key(key))
+}
+
+// c_method_name formats the conventional spelling only on a memo miss.
+fn (g &Parser) c_method_name(key string, module_name string, receiver_type string, name string) string {
+	if cached := g.c_function_name_memo[key] {
+		return cached
+	}
+	return g.c_function_name_or(key, fastc_method_c_name(module_name, receiver_type, name))
 }
 
 // c_function_name_or resolves the C symbol of function `key` for both its
@@ -194,11 +213,20 @@ fn fastc_signature_c_name(key string, signature FastcFunctionSignature) string {
 	}
 }
 
+// fastc_c_function_name_for_key returns the C name of the function `key`. A
+// main-module function (an unqualified key) is named `main__<name>`, as V 0.5.2
+// named it. FastC's prelude includes many libc headers (on macOS, <sys/ioctl.h>
+// also declares the socket API), so a bare name such as `bind` could redeclare a
+// libc function, and naming.c_name only knows a few of those names. The entry
+// `main` and FastC's own `__vf_` names keep their spelling.
 fn fastc_c_function_name_for_key(key string) string {
 	if key.starts_with('C.') {
 		return naming.c_name(key)
 	}
 	sanitized := naming.sanitize(key)
+	if key != 'main' && !key.contains('.') && !sanitized.starts_with('__vf_') {
+		return 'main__${sanitized}'
+	}
 	c_name := naming.c_name(key)
 	if c_name != sanitized || sanitized.starts_with('v_fastc_') || sanitized == 'byte' {
 		return '__vf_function_${sanitized}'
@@ -206,9 +234,9 @@ fn fastc_c_function_name_for_key(key string) string {
 	return c_name
 }
 
-fn fastc_disabled_call_expression(return_type string) string {
-	if return_type in ['', 'void'] {
+fn fastc_disabled_call_expression(return_type u32) string {
+	if return_type in [u32(0), flat.source_type_void] {
 		return '((void)0)'
 	}
-	return '((${return_type}){0})'
+	return '((${flat.source_type_name(return_type)}){0})'
 }

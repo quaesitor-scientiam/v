@@ -14,6 +14,24 @@ fn test_compiler_selection_flags_are_not_forwarded() {
 	]
 }
 
+fn test_native_backend_is_refused_except_for_vfmt() {
+	// `vfmt` maps the removed `native` alias onto the C formatter, and
+	// cmd/tools/vfmt_test.v requires the CLI form to work.
+	assert !native_backend_rejected('fmt', ['-b', 'native'])
+	assert !native_backend_rejected('fmt', ['-backend', 'native'])
+	assert !native_backend_rejected('fmt', ['-b', 'c'])
+
+	// Every other command keeps the migration guidance.
+	assert native_backend_rejected('run', ['-b', 'native', 'main.v'])
+	assert native_backend_rejected('build', ['-backend', 'native', 'main.v'])
+	assert native_backend_rejected('test', ['-b', 'native', '.'])
+	assert native_backend_rejected('', ['-b', 'native', 'main.v'])
+
+	// Unrelated backends are untouched.
+	assert !native_backend_rejected('run', ['-b', 'c', 'main.v'])
+	assert !native_backend_rejected('run', ['-b', 'fastc', 'main.v'])
+}
+
 fn test_v1_fallback_drops_private_restart_options() {
 	warning := '-v3-internal-implicit-tcc-warning=warning: implicit tcc failed'
 	assert v1_fallback_args([warning, '-v3-internal-parser-diagnostics-printed',
@@ -138,6 +156,13 @@ fn test_tools_that_consume_prefix_compiler_options_receive_them() {
 		'fmt',
 		'-verify',
 		'file.v',
+	]
+	assert external_tool_runtime_args('watch', ['-d', 'veb_livereload'], ['watch', 'run', '.']) == [
+		'-d',
+		'veb_livereload',
+		'watch',
+		'run',
+		'.',
 	]
 }
 
@@ -287,9 +312,27 @@ fn test_windows_makev_keeps_the_v3_tcc_root_absolute() {
 	// The bootstrap compiler emits the stage C, which this script then links.
 	// The absolute tcc path reaches it through `!stage_vflags!`, asserted below.
 	assert source.contains('"%V_BOOTSTRAP%" %V_BOOTSTRAP_VFLAGS% -gc none -g !stage_vflags! -o "%V_STAGE_C%" cmd/v')
-	assert source.contains('"%V_STAGE%" %V_BOOTSTRAP_VFLAGS% -keepc -g -showcc -cc "!tcc_exe!" -o "%V_UPDATED%" cmd/v')
 	assert source.contains('set stage_vflags=-cc "!tcc_exe!"')
+	// The stage compiler, and the self-hosted fallback, build the updated compiler
+	// with `!updated_vflags!`; each TCC route sets it to the absolute tcc path first.
+	assert_makev_routine_sets_tcc_before(source, 'build_fresh_v_with_tcc',
+		'"%V_STAGE%" %V_BOOTSTRAP_VFLAGS% -keepc -g -showcc !updated_vflags! -o "%V_UPDATED%" cmd/v')
+	assert_makev_routine_sets_tcc_before(source, 'build_self_hosted_with_tcc',
+		'"%V_EXE%" %V_BOOTSTRAP_VFLAGS% -g !updated_vflags! -o "%V_UPDATED%" cmd/v')
 	assert !source.contains('-cflags -Bthirdparty/tcc')
+}
+
+// assert_makev_routine_sets_tcc_before checks that the makev.bat subroutine `:name`
+// sets `updated_vflags` to the bundled tcc before it runs `command`.
+fn assert_makev_routine_sets_tcc_before(source string, name string, command string) {
+	text := source.replace('\r\n', '\n')
+	start := text.index('\n:${name}\n') or { panic('makev.bat has no `:${name}` subroutine') }
+	routine_end := text.index_after('\n:', start + 1) or { text.len }
+	routine := text[start..routine_end]
+	set_index := routine.index('\nset updated_vflags=-cc "!tcc_exe!"\n') or { -1 }
+	command_index := routine.index('\n${command}\n') or { -1 }
+	assert set_index >= 0, name
+	assert command_index > set_index, name
 }
 
 fn test_launcher_finds_external_commands() {
@@ -585,14 +628,14 @@ fn test_cached_fallback_root_is_preferred_when_installed() {
 	assert os.dir(resolved) == os.read_file(root_file)!.trim_space()
 }
 
-fn test_vls_fallback_installation_preserves_the_protocol() {
+fn test_transparent_fallback_installation_preserves_diagnostics() {
 	$if !windows {
 		base := os.join_path(os.vtmp_dir(), 'vls_fallback_install_${os.getpid()}')
 		os.rmdir_all(base) or {}
 		defer {
 			os.rmdir_all(base) or {}
 		}
-		for mode in ['vls', 'ordinary', 'failed', 'missing'] {
+		for mode in ['vls', 'legacy_fixture', 'ordinary', 'failed', 'missing'] {
 			root := os.join_path(base, mode)
 			bin := os.join_path(root, 'bin')
 			cache := os.join_path(root, 'cache')
@@ -628,8 +671,15 @@ fn test_vls_fallback_installation_preserves_the_protocol() {
 			environment['V1_FALLBACK_TEST_MODE'] = mode
 			environment['V1_FALLBACK_TEST_RELEASE'] = release
 			environment['V1_FALLBACK_TEST_RESPONSE'] = os.join_path(release, 'source.v') + ':10:20'
+			if mode == 'legacy_fixture' {
+				os.write_file(os.join_path(root, 'source.vv'), 'import v.ast\n')!
+				os.write_file(os.join_path(root, 'source.out'), '`old.ast.Type`\n')!
+				environment['V1_FALLBACK_TEST_RESPONSE'] = 'error: cannot use `v.ast.Type`'
+			}
 			args := if mode == 'ordinary' {
 				['-old-compiler', 'source.v']
+			} else if mode == 'legacy_fixture' {
+				['source.vv']
 			} else {
 				['-vls-mode', 'source.v']
 			}
@@ -637,6 +687,9 @@ fn test_vls_fallback_installation_preserves_the_protocol() {
 			if mode == 'vls' {
 				assert result.exit_code == 0, result.output
 				assert result.output.trim_space() == os.join_path(os.real_path(root), 'source.v') + ':10:20', result.output
+			} else if mode == 'legacy_fixture' {
+				assert result.exit_code == 0, result.output
+				assert result.output.trim_space() == 'error: cannot use `old.ast.Type`', result.output
 			} else {
 				assert result.exit_code == if mode == 'ordinary' { 0 } else { 1 }, result.output
 				assert result.output.contains('running `make v1` now'), result.output
@@ -970,6 +1023,29 @@ fn test_install_external_tool_modules_leaves_a_build_with_a_path_to_the_compiler
 	// there would not help. The compiler reports the missing module instead.
 	install_external_tool_modules('vdoc', tool_source, ['-path', path_root])
 	assert !os.exists(attempts)
+}
+
+fn test_ownership_bootstrap_recognizes_compiler_inputs_only() {
+	root := os.join_path(os.temp_dir(), 'v3_bootstrap_inputs_${os.getpid()}')
+	defer { os.rmdir_all(root) or {} }
+	for entry in ['cmd/v', 'vlib/v'] {
+		directory := os.join_path(root, entry)
+		os.mkdir_all(directory)!
+		os.write_file(os.join_path(directory, 'v.v'), 'module main')!
+	}
+	for entry in ['cmd/v', 'cmd/v/v.v', 'vlib/v', 'vlib/v/v.v'] {
+		input := os.join_path(root, entry)
+		args := ['-gc', 'none', '-d', 'ownership', '-o', 'compiler', input]
+		assert compiler_bootstrap_requested(args, root)
+	}
+	entry := os.join_path(root, 'vlib/v/v.v')
+	assert compiler_bootstrap_requested(['run', entry], root)
+	assert compiler_bootstrap_requested(['crun', entry], root)
+	input := os.join_path(root, 'v.v')
+	os.write_file(input, 'module main')!
+	assert !compiler_bootstrap_requested(['-d', 'ownership', input], root)
+	assert !compiler_bootstrap_requested(['-o', entry, input], root)
+	assert !compiler_bootstrap_requested(['-path', entry, input], root)
 }
 
 fn test_v1_fallback_rejects_copied_current_launcher() {

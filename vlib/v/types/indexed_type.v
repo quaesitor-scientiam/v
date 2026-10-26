@@ -77,7 +77,7 @@ pub fn (tc &TypeChecker) type_by_id(id TypeId) ?Type {
 	if u32(id) >= u32(interner.types.len) {
 		return none
 	}
-	return interner.types[int(id)]
+	return *interner.types[int(id)]
 }
 
 // type_name_by_id returns the source spelling ID of an interned semantic type.
@@ -137,8 +137,9 @@ pub fn (tc &TypeChecker) parse_type_id(text u32) ?TypeId {
 }
 
 @[inline]
-fn scalar_builtin_type_name(text string) bool {
-	return is_builtin_type_name(text) && text != 'array' && text != 'map'
+fn scalar_builtin_type_name_id(source_id u32) bool {
+	return is_builtin_type_name_id(source_id) && source_id != qualify_source_type_array
+		&& source_id != qualify_source_type_map
 }
 
 @[direct_array_access; inline]
@@ -147,7 +148,7 @@ fn parsed_scalar_slot(source_id u32) int {
 }
 
 @[direct_array_access; inline]
-fn (tc &TypeChecker) parsed_scalar_type(text u32) ?Type {
+fn (tc &TypeChecker) parsed_scalar_type(text u32) ?&Type {
 	cache := tc.type_cache.parsed_scalars
 	if isnil(cache) || cache.owner != tc.type_interner || text == 0 {
 		return none
@@ -161,7 +162,9 @@ fn (tc &TypeChecker) parsed_scalar_type(text u32) ?Type {
 
 // Only exact builtin spellings enter this cache. Their meanings do not depend
 // on imports, the current module, resolution mode or function-local scopes.
-fn (tc &TypeChecker) remember_parsed_scalar_type(text u32, id TypeId, value Type) {
+// Values are canonical pointers; reset and promotion clear the cache before
+// replacing their interner storage.
+fn (tc &TypeChecker) remember_parsed_scalar_type(text u32, id TypeId, value &Type) {
 	if isnil(tc.type_interner) {
 		return
 	}
@@ -170,7 +173,7 @@ fn (tc &TypeChecker) remember_parsed_scalar_type(text u32, id TypeId, value Type
 		type_cache.parsed_scalars = &ParsedScalarTypeCache{
 			owner:  tc.type_interner
 			// Unfilled slots are guarded by their nonempty text key.
-			values: unsafe { []Type{len: 128} }
+			values: unsafe { []&Type{len: 128} }
 		}
 	}
 	mut cache := type_cache.parsed_scalars

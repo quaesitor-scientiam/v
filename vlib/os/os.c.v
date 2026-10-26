@@ -2,10 +2,10 @@ module os
 
 import strings
 
-$if macos {
-	// needed for os.executable():
-	fn C._dyld_get_image_name(image u32) &char
-}
+// needed for os.executable() on macOS. Declared outside `$if macos`: `-cross` output
+// keeps the macOS branch of executable(), while a top-level `$if macos` is resolved
+// for the host that generates it.
+fn C._dyld_get_image_name(image u32) &char
 
 // BSD sysctl identifiers stay in V so executable lookup does not require C headers.
 const sysctl_ctl_kern = i32(1)
@@ -19,7 +19,7 @@ pub const args = arguments()
 
 fn C.readdir(voidptr) &C.dirent
 
-fn C.readlink(pathname &char, buf &char, bufsiz usize) i32
+fn C.readlink(pathname &char, buf &char, bufsiz uint) i32
 
 fn C.getline(voidptr, voidptr, voidptr) i32
 
@@ -60,7 +60,7 @@ fn write_file_direct(path string, text string) ! {
 			return error('0 bytes written')
 		}
 		remaining -= written
-		sp = unsafe { &u8(voidptr(usize(sp) + usize(written))) }
+		sp = unsafe { &u8(voidptr(uint(sp) + uint(written))) }
 	}
 }
 
@@ -384,6 +384,7 @@ fn vpopen(path string) voidptr {
 	$if windows {
 		mode := 'rb'
 		wpath := path.to_wide()
+		windows_avoid_long_temp_env()
 		return C._wpopen(wpath, mode.to_wide())
 	} $else {
 		cpath := path.str
@@ -457,6 +458,7 @@ pub fn system(cmd string) int {
 		wcmd := if cmd.len > 1 && cmd[0] == `"` && cmd[1] != `"` { '"${cmd}"' } else { cmd }
 		flush_stdout()
 		flush_stderr()
+		windows_avoid_long_temp_env()
 		unsafe {
 			ret = C._wsystem(wcmd.to_wide())
 		}
@@ -505,8 +507,10 @@ pub fn system(cmd string) int {
 // whether lstat returns any result or a "not exists" error gives a clear indication of whether the path is occupied.
 pub fn exists(path string) bool {
 	$if windows {
+		// GetFileAttributesW is a Win32 call, so a longPathAware executable can use paths
+		// past MAX_PATH with it, where the CRT's _waccess cannot.
 		p := path.replace('/', '\\')
-		return C._waccess(p.to_wide(), f_ok) != -1
+		return C.GetFileAttributesW(p.to_wide()) != u32(C.INVALID_FILE_ATTRIBUTES)
 	} $else {
 		return C.access(&char(path.str), f_ok) != -1
 	}
@@ -668,7 +672,7 @@ pub fn get_raw_line() string {
 		unsafe {
 			initial_size := 256 * wide_char_size
 			mut buf := malloc_noscan(initial_size)
-			defer { buf.free() }
+			defer { unsafe { buf.free() } }
 			mut capacity := initial_size
 			mut offset := 0
 
@@ -726,7 +730,7 @@ pub fn get_raw_line() string {
 			}
 		}
 	} $else {
-		max := usize(0)
+		max := uint(0)
 		buf := &u8(unsafe { nil })
 
 		mut str := ''
@@ -778,7 +782,7 @@ pub fn get_raw_stdin() []u8 {
 			}
 		}
 	} $else {
-		max := usize(0)
+		max := uint(0)
 		buf := &u8(unsafe { nil })
 		nr_chars := unsafe { C.getline(voidptr(&buf), &max, C.stdin) }
 		$if race ? {
@@ -877,7 +881,7 @@ pub fn executable() string {
 		return unsafe { cstring_to_vstring(self_path) }
 	}
 	$if freebsd {
-		bufsize := usize(max_path_buffer_size)
+		bufsize := uint(max_path_buffer_size)
 		mib := [sysctl_ctl_kern, freebsd_kern_proc, freebsd_kern_proc_pathname, -1]! // C `int` mib buffer
 		unsafe { C.sysctl(&mib[0], mib.len, &result[0], &bufsize, 0, 0) }
 		res := unsafe { tos_clone(&result[0]) }
@@ -891,7 +895,7 @@ pub fn executable() string {
 		// See also https://github.com/gpakosz/whereami/blob/master/src/whereami.c#L591
 		// and https://github.com/ziglang/zig/issues/6718#issuecomment-711134120 .
 		mut pbuf := unsafe { &&u8(&result[0]) }
-		bufsize := usize(max_path_buffer_size)
+		bufsize := uint(max_path_buffer_size)
 		pid := C.getpid()
 		mib := [sysctl_ctl_kern, openbsd_kern_proc_args, pid, openbsd_kern_proc_argv]! // C `int` mib buffer
 		if unsafe { C.sysctl(&mib[0], mib.len, nil, &bufsize, nil, 0) } == 0 {
@@ -1037,13 +1041,13 @@ fn relative_path_from_cwd(fpath string, buf voidptr, size int) int {
 		// both parts, the separator and the terminator was compared with `size` above.
 		unsafe {
 			mut dst := &u8(buf)
-			C.memcpy(dst, cwd, usize(cwd_len))
+			C.memcpy(dst, cwd, uint(cwd_len))
 			mut n := cwd_len
 			if cwd[cwd_len - 1] != `/` {
 				dst[n] = `/`
 				n++
 			}
-			C.memcpy(dst + n, fpath.str, usize(fpath.len))
+			C.memcpy(dst + n, fpath.str, uint(fpath.len))
 			dst[n + fpath.len] = 0
 		}
 		return cwd_len
@@ -1255,8 +1259,11 @@ pub fn open_append(path string) !File {
 	if isnil(file.cfile) {
 		return error_posix(msg: 'failed to create(append) file "${path}"')
 	}
-	file.is_opened = true
-	return file
+	return File{
+		cfile:     file.cfile
+		fd:        fileno(file.cfile)
+		is_opened: true
+	}
 }
 
 // execvp - loads and executes a new child process, *in place* of the current process.
@@ -1273,6 +1280,7 @@ pub fn execvp(cmdpath string, cmdargs []string) ! {
 	cargs << &char(unsafe { nil })
 	mut res := int(0)
 	$if windows {
+		windows_avoid_long_temp_env()
 		res = C._execvp(&char(cmdpath.str), cargs.data)
 	} $else {
 		res = C.execvp(&char(cmdpath.str), cargs.data)
@@ -1298,8 +1306,16 @@ pub fn execve(cmdpath string, cmdargs []string, envs []string) ! {
 	for i in 0 .. cmdargs.len {
 		cargv << &char(cmdargs[i].str)
 	}
-	for i in 0 .. envs.len {
-		cenvs << &char(envs[i].str)
+	$if windows {
+		windows_avoid_long_temp_env()
+	}
+	child_envs := $if windows {
+		windows_temp_env_entries_fix(envs, windows_temp_env_candidates)
+	} $else {
+		envs
+	}
+	for i in 0 .. child_envs.len {
+		cenvs << &char(child_envs[i].str)
 	}
 	cargv << &char(unsafe { nil })
 	cenvs << &char(unsafe { nil })
@@ -1356,7 +1372,7 @@ pub fn write_file_array(path string, buffer array) ! {
 	defer {
 		f.close()
 	}
-	unsafe { f.write_full_buffer(buffer.data, usize(buffer.len * buffer.element_size))! }
+	unsafe { f.write_full_buffer(buffer.data, uint(buffer.len * buffer.element_size))! }
 }
 
 // glob function searches for all the pathnames matching patterns and returns a

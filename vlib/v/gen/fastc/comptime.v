@@ -194,11 +194,12 @@ fn fastc_scan_selected_comptime_branch(mut scan scanner.Scanner, first token.Tok
 	return FastcComptimeBlock{}
 }
 
-fn fastc_collect_selected_comptime_function_signatures(source string, source_offset int, path string, header FastcSourceHeader, prefs &pref.Preferences, declared_types map[string]bool, declared_type_c_names flat.TypeTextBindings, params_structs map[string]bool, mut functions map[string]FastcFunctionSignature) ! {
+fn fastc_collect_selected_comptime_function_signatures(source string, source_offset int, path string, header FastcSourceHeader, prefs &pref.Preferences, skips []int, declared_types map[string]bool, declared_type_c_names flat.TypeTextBindings, params_structs map[string]bool, mut functions map[string]FastcFunctionSignature) ! {
 	file := token.File.unindexed(path, source.len)
 	mut scan := scanner.new_scanner(prefs, .normal)
 	scan.init(file, source)
 	mut brace_depth := 0
+	mut skip_index := 0
 	mut tok := scan.scan()
 	for tok != .eof {
 		if brace_depth == 0 && tok == .dollar {
@@ -209,6 +210,14 @@ fn fastc_collect_selected_comptime_function_signatures(source string, source_off
 					collect_function_signatures_at(selected.source, source_offset + selected.offset, path, header, prefs, []int{}, declared_types, declared_type_c_names, params_structs, mut functions)!
 				}
 				tok = selected.tok
+				continue
+			}
+		}
+		if tok == .lcbr && brace_depth == 0 {
+			skipped, next_skip := fastc_skip_recorded_body(mut scan, skips, skip_index)
+			skip_index = next_skip
+			if skipped {
+				tok = scan.scan()
 				continue
 			}
 		}
@@ -327,7 +336,7 @@ fn (mut g Parser) parse_comptime_match_statement() !bool {
 			branch_matches = !selected
 		} else {
 			for {
-				target_type := (g.parse_type()!)
+				target_type := g.parse_type()!
 				branch_matches = branch_matches || g.underlying_alias_type(subject_type) == g.underlying_alias_type(target_type)
 				if g.tok != .comma {
 					break
@@ -415,14 +424,28 @@ fn (mut g Parser) parse_comptime_for_statement() !bool {
 	if body_end < 0 {
 		return g.unsupported('unterminated `\$for` block')
 	}
-	body_source := g.s.src[body_start..body_end]
+	body_source := FastcSourceFile{
+		path:           g.path
+		source:         g.s.src[body_start..body_end]
+		source_offset:  g.source_offset + body_start
+		source_origins: g.source_origins
+	}
 	g.next() // consume the closing `}`; the main scanner now continues after it
 	saved_tok := g.tok
 	saved_lit := g.lit
 	saved_s := g.s
+	saved_source_offset := g.source_offset
+	saved_source_origins := g.source_origins
+	defer {
+		g.s = saved_s
+		g.tok = saved_tok
+		g.lit = saved_lit
+		g.source_offset = saved_source_offset
+		g.source_origins = saved_source_origins
+	}
 	// Build one substituted body per iteration item: a struct field for `.fields`,
 	// or an enum value for `.values`.
-	mut substituted_bodies := []string{}
+	mut substituted_bodies := []FastcSourceFile{}
 	if member == 'values' {
 		for value_name in g.enum_field_names[c_type] {
 			substituted_bodies << g.substitute_comptime_enum_value(body_source, loop_var, c_type, value_name)
@@ -435,9 +458,11 @@ fn (mut g Parser) parse_comptime_for_statement() !bool {
 	for substituted in substituted_bodies {
 		// Re-scan each unrolled body as ordinary V — no comptime awareness is needed
 		// in the renderer.
-		file := token.File.unindexed('comptime_for', substituted.len)
+		file := token.File.unindexed('comptime_for', substituted.source.len)
 		g.s = scanner.new_scanner(g.prefs, .normal)
-		g.s.init(file, substituted)
+		g.s.init(file, substituted.source)
+		g.source_offset = substituted.source_offset
+		g.source_origins = substituted.source_origins
 		g.next()
 		// A fresh C block scopes any locals the body declares, so re-parsing it per
 		// item does not redeclare them in the enclosing scope.
@@ -453,9 +478,6 @@ fn (mut g Parser) parse_comptime_for_statement() !bool {
 		g.indent--
 		g.write_line('}')
 	}
-	g.s = saved_s
-	g.tok = saved_tok
-	g.lit = saved_lit
 	return false
 }
 
@@ -470,7 +492,8 @@ fn fastc_comptime_loop_var_token(tok token.Token) bool {
 	return tok in [.name, .key_shared]
 }
 
-fn (g &Parser) substitute_comptime_field(body string, loop_var string, field FastcStructField) string {
+fn (g &Parser) substitute_comptime_field(source_file FastcSourceFile, loop_var string, field FastcStructField) FastcSourceFile {
+	body := source_file.source
 	field_name := field.name
 	file := token.File.unindexed('cf', body.len)
 	mut s := scanner.new_scanner(g.prefs, .normal)
@@ -607,11 +630,11 @@ fn (g &Parser) substitute_comptime_field(body string, loop_var string, field Fas
 						type_c, type_end, next_after := g.read_comptime_is_type(mut s)
 						if type_c != '' {
 							matches := if type_c.starts_with('?') {
-								field.option_value_type_text() == type_c[1..]
+								field.option_value_type == flat.source_type_id(type_c[1..])
 							} else if type_c.starts_with('@') {
 								g.comptime_type_matches(field.typ, flat.source_type_id(type_c[1..]), true)
 							} else {
-								field.typ_text().trim_right('*') == type_c
+								fastc_trim_pointer_type(field.typ) == flat.source_type_id(type_c)
 							}
 							edits << FastcSourceEdit{
 								start:       var_pos
@@ -645,14 +668,15 @@ fn (g &Parser) substitute_comptime_field(body string, loop_var string, field Fas
 		previous = tok
 		tok = s.scan()
 	}
-	return fastc_apply_source_edits(body, edits)
+	return fastc_apply_mapped_source_edits(source_file, edits)
 }
 
 // substitute_comptime_enum_value rewrites one `$for x in Enum.values { ... }` body
 // for a single enum value: `<var>.name` becomes the value-name string literal and
 // `<var>.value` becomes the enum's C constant. Other `<var>.<member>` forms are left
 // as-is so they surface as unsupported when re-parsed.
-fn (g &Parser) substitute_comptime_enum_value(body string, loop_var string, enum_c_type string, value_name string) string {
+fn (g &Parser) substitute_comptime_enum_value(source_file FastcSourceFile, loop_var string, enum_c_type string, value_name string) FastcSourceFile {
+	body := source_file.source
 	mut file_set := token.FileSet.new()
 	mut file := file_set.add_file('cv', body.len)
 	file.index_lines_without_digest(body)
@@ -692,7 +716,7 @@ fn (g &Parser) substitute_comptime_enum_value(body string, loop_var string, enum
 		}
 		tok = s.scan()
 	}
-	return fastc_apply_source_edits(body, edits)
+	return fastc_apply_mapped_source_edits(source_file, edits)
 }
 
 // read_comptime_is_type reads the type on the right of `<var>.typ is <Type>` and
@@ -904,7 +928,7 @@ fn (mut g Parser) parse_comptime_unary() !bool {
 			target_type = flat.source_type_id(g.lit)
 			g.next()
 		} else {
-			target_type = (g.parse_type()!)
+			target_type = g.parse_type()!
 		}
 		mut left_type := g.comptime_named_type(name)
 		if subject_pointer_depth > 0 {
@@ -914,7 +938,7 @@ fn (mut g Parser) parse_comptime_unary() !bool {
 			left_type = g.underlying_alias_type(left_type)
 		}
 		if pointee_type {
-			left_type = (if flat.source_type_name(left_type).ends_with('*') {
+			left_type = (if flat.source_type_query(left_type).has(.c_pointer_suffix) {
 				flat.source_type_id(flat.source_type_name(left_type)[..flat.source_type_name(left_type).len - 1])
 			} else {
 				flat.source_type_void
@@ -980,20 +1004,22 @@ fn (g &Parser) comptime_type_matches(left_type u32, target_type u32, target_is_g
 	original_key := g.semantic_type_key(left_type)
 	return match flat.source_type_name(target_type) {
 		'array' {
-			flat.source_type_name(left).starts_with('Array_') || flat.source_type_name(left) == 'array'
+			flat.source_type_name(left).starts_with('Array_') || left == fastc_type_array
 		}
 		'array_fixed' {
 			flat.source_type_name(left).starts_with('FixedArray_')
 		}
 		'map' {
-			flat.source_type_name(left).starts_with('Map_') || flat.source_type_name(left) == 'map'
+			flat.source_type_name(left).starts_with('Map_') || left == fastc_type_map
 		}
 		'string' {
 			left == flat.source_type_string
 		}
 		'int' {
-			flat.source_type_name(left) in ['i8', 'i16', 'i32', 'i64', 'int', 'isize', 'u8', 'u16',
-				'u32', 'u64', 'uint', 'usize']
+			left in [flat.source_type_i8, flat.source_type_i16, flat.source_type_i32,
+				flat.source_type_i64, flat.source_type_int, flat.source_type_isize,
+				flat.source_type_u8, flat.source_type_u16, flat.source_type_u32, flat.source_type_u64,
+				fastc_type_uint, flat.source_type_usize]
 		}
 		'float' {
 			left in [flat.source_type_f32, flat.source_type_f64]
@@ -1265,7 +1291,7 @@ fn (mut g Parser) read_comptime_if_expression() !string {
 	if condition {
 		value := g.read_expression([token.Token.semicolon, token.Token.rcbr])!
 		value_type := g.last_expression_type
-		option_value_type := if flat.source_type_name(value_type) in ['Option', '__v_result'] {
+		option_value_type := if value_type in [fastc_type_option, fastc_type_result] {
 			if g.last_expression.len > 0 {
 				g.option_value_type_for_expression(g.last_expression)
 			} else {
@@ -1303,7 +1329,7 @@ fn (mut g Parser) read_comptime_if_expression() !string {
 	g.expect(.lcbr)!
 	value := g.read_expression([token.Token.semicolon, token.Token.rcbr])!
 	value_type := g.last_expression_type
-	option_value_type := if flat.source_type_name(value_type) in ['Option', '__v_result'] {
+	option_value_type := if value_type in [fastc_type_option, fastc_type_result] {
 		if g.last_expression.len > 0 {
 			g.option_value_type_for_expression(g.last_expression)
 		} else {

@@ -390,6 +390,7 @@ fn (mut g FlatGen) finish_cache_declaration_demand(const_code string) {
 		}
 	}
 	g.decl_types_ready = false
+	g.selected_decl_types_ready = false
 	g.collect_declaration_signature_types()
 	for init in g.runtime_inits {
 		g.cache_collect_declaration_refs(init)
@@ -501,7 +502,7 @@ fn (mut g FlatGen) cache_require_declaration_type(typ types.Type, mut seen map[u
 		types.FnType {
 			g.cache_require_declaration_type(typ.return_type, mut seen)
 			for param in typ.params {
-				g.cache_require_declaration_type(param, mut seen)
+				g.cache_require_declaration_type(param.typ, mut seen)
 			}
 		}
 		types.MultiReturn {

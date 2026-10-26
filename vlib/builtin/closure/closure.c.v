@@ -112,7 +112,9 @@ fn is_ppc64() bool {
 // The final `big_endian` branch maps to ppc64 here, since the supported big-endian
 // closure targets handled above are s390x and sparc64.
 // vfmt off
-pub const closure_thunk = $if ppc64le {
+pub const closure_thunk = $if cross ? {
+    portable_closure_thunk()
+} $else $if ppc64le {
     [
     u8(0xa6), 0x02, 0x08, 0x7c,	// mflr   %r0
         0x05, 0x00, 0x00, 0x48,	// bl     here
@@ -233,7 +235,9 @@ pub const closure_thunk = $if ppc64le {
 
 // NOTE: Keep the first branch as the longest byte sequence. In translated/bootstrap C mode
 // (`vc/v.c`), V emits a fixed C array whose size is inferred from the first branch.
-const closure_get_data_bytes = $if !ppc64le && !amd64 && !i386 && !arm64 && !arm32 && !rv64 && !rv32 && !s390x && !loongarch64 {
+const closure_get_data_bytes = $if cross ? {
+    portable_closure_get_data_bytes()
+} $else $if !ppc64le && !amd64 && !i386 && !arm64 && !arm32 && !rv64 && !rv32 && !s390x && !loongarch64 {
     // ppc (32-bit PowerPC) - expressed as negation of all other arches for bootstrap compat
     [
     u8(0x94), 0x21, 0xff, 0xf0,	// stwu   %r1, -16(%r1)
@@ -343,7 +347,7 @@ fn closure_slot_meta(exec_ptr voidptr) &voidptr {
 
 fn closure_register_page(exec_page_start voidptr) {
 	unsafe {
-		node := &ClosurePage(malloc(sizeof(ClosurePage)))
+		node := &ClosurePage(malloc(int(sizeof(ClosurePage))))
 		*node = ClosurePage{
 			next:            g_closure.pages
 			exec_page_start: exec_page_start
@@ -356,13 +360,13 @@ fn closure_is_managed(exec_ptr voidptr) bool {
 	if isnil(exec_ptr) {
 		return false
 	}
-	exec_addr := unsafe { usize(exec_ptr) }
+	exec_addr := unsafe { uint(exec_ptr) }
 	mut page := g_closure.pages
 	for page != unsafe { nil } {
-		page_addr := unsafe { usize(page.exec_page_start) }
-		if exec_addr >= page_addr && exec_addr < page_addr + usize(g_closure.v_page_size) {
+		page_addr := unsafe { uint(page.exec_page_start) }
+		if exec_addr >= page_addr && exec_addr < page_addr + uint(g_closure.v_page_size) {
 			slot_offset := exec_addr - page_addr
-			return slot_offset >= usize(closure_size) && slot_offset % usize(closure_size) == 0
+			return slot_offset >= uint(closure_size) && slot_offset % uint(closure_size) == 0
 		}
 		page = page.next
 	}
@@ -394,7 +398,7 @@ fn new_closure_lifetime_state_no_lock() &ClosureLifetimeState {
 		g_closure.free_lifetime_states = state.next_free
 	} else {
 		unsafe {
-			state = &ClosureLifetimeState(malloc(sizeof(ClosureLifetimeState)))
+			state = &ClosureLifetimeState(malloc(int(sizeof(ClosureLifetimeState))))
 		}
 		g_closure.lifetime_state_allocs++
 	}

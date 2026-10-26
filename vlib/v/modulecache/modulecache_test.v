@@ -187,6 +187,16 @@ int external_helper(void) {
 	assert !header.contains('return local_helper();')
 }
 
+fn test_declaration_header_keeps_macro_static_string_definitions() {
+	source := '#define _SL(name, text, length) static const char *name = text;\n_SL(first, " __attribute__((", 16);\n_SL(second, ") && (*(", 8);\n_SL(third, "#define VALUE {", 15);\nint global = 42;\n'
+	header := declaration_header(source)
+	assert header.contains('_SL(first, " __attribute__((", 16);')
+	assert header.contains('_SL(second, ") && (*(", 8);')
+	assert header.contains('_SL(third, "#define VALUE {", 15);')
+	assert !header.contains('extern _SL(')
+	assert header.contains('extern int global;')
+}
+
 fn test_replicated_function_static_storage_detection() {
 	assert c_source_replicated_function_has_static_storage('static inline int next_value(void) {
 	static int state = 0;
@@ -266,6 +276,57 @@ fn test_static_const_body_literals_are_preserved_and_deduplicated() {
 	assert without_duplicate_static_string_definitions(source, first) == second + 'void main__main(void) { println(_v3_lit_1_44bd54d473cd3d44); }\n'
 	assert materialize_cached_body_string_definitions('// V3CACHE_BASELINE ' + first + second) == first + second
 	assert !prune_unreferenced_static_string_definitions(source).contains('_v3_lit_1_44bd55d473cd3ef7')
+}
+
+// split_literal_definition is how cgen writes a literal too long for one C source
+// line: adjacent literals, each on a line of its own.
+fn split_literal_definition(symbol string, parts []string) string {
+	value := parts.join('')
+	return 'static const string ${symbol} = {"' + parts.join('"\n"') + '", ${value.len}, 1};\n'
+}
+
+fn test_split_literal_definitions_are_kept_or_dropped_whole() {
+	unused := split_literal_definition(cached_c_string_symbol('aaaabbbbcccc'), ['aaaa', 'bbbb',
+		'cccc'])
+	used_symbol := cached_c_string_symbol('ddddeeee')
+	used := split_literal_definition(used_symbol, ['dddd', 'eeee'])
+	short := 'static const string _v3_lit_1_44bd55d473cd3ef7 = {".", 1, 1};\n'
+	body := 'void f(void) { println(${used_symbol}); }\n'
+	source := unused + short + used + body
+	assert prune_unreferenced_static_string_definitions(source) == used + body
+	assert static_string_definitions(source) == unused + short + used
+	assert static_string_definition_texts(source) == [unused.trim_right('\n'), short.trim_right('\n'),
+		used.trim_right('\n')]
+	assert without_duplicate_static_string_definitions(source, unused + short) == used + body
+}
+
+fn test_split_literal_definitions_survive_baseline_markers() {
+	symbol := cached_c_string_symbol('aaaabbbbcccc')
+	definition := split_literal_definition(symbol, ['aaaa', 'bbbb', 'cccc'])
+	mut markers := ''
+	for line in definition.split_into_lines() {
+		markers += '// V3CACHE_BASELINE ${line}\n'
+	}
+	body := 'void f(void) { println(${symbol}); }\n'
+	assert materialize_cached_body_string_definitions(markers + body) == definition + body
+	// A real definition takes precedence over the recorded one, whole.
+	assert materialize_cached_body_string_definitions(markers + definition + body) == definition + body
+}
+
+fn test_cached_runtime_literal_rewrite_replaces_split_definitions() {
+	old_value := 'aaaabbbbcccc'
+	new_value := 'aaaabbbbdddd'
+	old_symbol := cached_c_string_symbol(old_value)
+	new_symbol := cached_c_string_symbol(new_value)
+	source := split_literal_definition(old_symbol, ['aaaa', 'bbbb', 'cccc']) +
+		'${c_body_begin}\nvoid main(void) { use(${old_symbol}); }\n'
+	rewritten := rewrite_cached_runtime_strings(source, [old_value], [new_value]) or {
+		panic('expected the split literal to be rewritten')
+	}
+	assert !rewritten.contains(old_symbol)
+	assert !rewritten.contains('"cccc"')
+	assert rewritten.count('static const string ${new_symbol} =') == 1
+	assert rewritten.contains('use(${new_symbol});')
 }
 
 fn test_type_declarations_omit_functions_with_local_typedefs() {
@@ -582,170 +643,6 @@ fn test_cached_source_signature_keeps_per_file_sha256_digests() {
 	assert cached.source_digests == details.source_digests
 }
 
-fn test_cached_source_signature_tracks_vml_inputs() {
-	root := os.join_path(os.vtmp_dir(), 'v3_modulecache_vml_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(root) or { panic(err) }
-	defer {
-		os.rmdir_all(root) or {}
-	}
-	source := os.join_path(root, 'main.v')
-	vml := os.join_path(root, 'form.vml')
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form.vml') }\n")!
-	os.write_file(vml, 'Label { text: "A" }')!
-	cache_dir := os.join_path(root, 'cache')
-
-	first := cached_source_signature(cache_dir, 'vml', [source])
-	assert first.len > 0
-	assert source_signature_details([source], '', '').cacheable
-	os.write_file(vml, 'Label { text: "Changed" }')!
-	second := cached_source_signature(cache_dir, 'vml', [source])
-	assert second.len > 0
-	assert second != first
-	ignored_paths, ignored_lookups, ignored_candidates, ignored_unresolved := compile_time_vml_paths('// \$vml(\'ignored.vml\')\nconst s = "\$vml(\'also_ignored.vml\')"', source)
-	assert ignored_paths.len == 0
-	assert ignored_lookups.len == 0
-	assert ignored_candidates.len == 0
-	assert !ignored_unresolved
-
-	os.write_file(source, "module main\n\nconst form_path = 'form.vml'\nfn build() { _ = \$vml(form_path) }\n")!
-	before_cache_entries := os.ls(cache_dir)!.len
-	dynamic := cached_source_signature_details_with_build_values(cache_dir, 'dynamic-vml', [
-		source,
-	], '', '')
-	assert dynamic.signature.len > 0
-	assert !dynamic.cacheable
-	assert os.ls(cache_dir)!.len == before_cache_entries
-	dynamic_paths, dynamic_lookups, dynamic_candidates, dynamic_unresolved := compile_time_vml_paths(os.read_file(source)!, source)
-	assert dynamic_paths.len == 0
-	assert dynamic_lookups.len == 0
-	assert dynamic_candidates.len == 0
-	assert dynamic_unresolved
-	concat_paths, concat_lookups, concat_candidates, concat_unresolved := compile_time_vml_paths("fn build() { _ = \$vml(template_dir + '/form.vml') }", source)
-	assert concat_paths.len == 0
-	assert concat_lookups.len == 0
-	assert concat_candidates.len == 0
-	assert concat_unresolved
-	os.write_file(os.join_path(root, 'form'), 'not the selected template')!
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form' + '.vml') }\n")!
-	literal_concat := source_signature_details([source], '', '')
-	assert literal_concat.signature.len > 0
-	assert !literal_concat.cacheable
-	literal_paths, literal_lookups, literal_candidates, literal_unresolved := compile_time_vml_paths(os.read_file(source)!, source)
-	assert literal_paths.len == 0
-	assert literal_lookups.len == 0
-	assert literal_candidates.len == 0
-	assert literal_unresolved
-	manager := Manager{
-		dir:     os.join_path(root, 'module-cache')
-		enabled: true
-		salt:    'dynamic-vml-test'
-	}
-	manager.write_header('dynamic_vml', [source], '// generated header')!
-	if _ := manager.valid_header('dynamic_vml', [source]) {
-		assert false, 'an unresolved compile-time VML path must disable cache reuse'
-	}
-}
-
-fn test_vml_signature_scanner_preserves_raw_paths() {
-	call := r'$' + r"vml(r'C:\views\form.vml')"
-	raw_path, next_pos, ok, is_raw := signature_string_call_arg(call, 4)
-	assert ok
-	assert is_raw
-	assert next_pos == call.len
-	assert raw_path == r'C:\views\form.vml'
-
-	target, expected_candidates := resolve_signature_vml_path(raw_path, @FILE)
-	paths, lookups, candidates, unresolved := compile_time_vml_paths(call, @FILE)
-	assert paths == [os.real_path(target)]
-	assert lookups == [target]
-	assert candidates == expected_candidates.map(os.real_path(it))
-	assert !unresolved
-
-	root := os.join_path(os.vtmp_dir(), 'v3_modulecache_vml_raw_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(root) or { panic(err) }
-	defer {
-		os.rmdir_all(root) or {}
-	}
-	source := os.join_path(root, 'main.v')
-	relative_call := r'$' + r"vml(r'views\form.vml')"
-	os.write_file(source, 'module main\n\nfn build() { _ = ' + relative_call + ' }\n')!
-	vml_path, _ := resolve_signature_vml_path(r'views\form.vml', source)
-	os.mkdir_all(os.dir(vml_path))!
-	os.write_file(vml_path, 'Label { text: "Raw" }')!
-	cache_dir := os.join_path(root, 'cache')
-	first := cached_source_signature(cache_dir, 'vml-raw', [source])
-	assert first.len > 0
-	assert source_signature_details([source], '', '').cacheable
-	assert cached_source_signature(cache_dir, 'vml-raw', [source]) == first
-}
-
-fn test_cached_source_signature_tracks_shadowing_vml_paths() {
-	root := os.join_path(os.vtmp_dir(), 'v3_modulecache_vml_shadow_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(os.join_path(root, 'templates')) or { panic(err) }
-	defer {
-		os.rmdir_all(root) or {}
-	}
-	source := os.join_path(root, 'main.v')
-	direct_vml := os.join_path(root, 'form.vml')
-	direct_candidate := os.join_path(os.real_path(root), 'form.vml')
-	template_vml := os.join_path(root, 'templates', 'form.vml')
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form.vml') }\n")!
-	os.write_file(template_vml, 'Label { text: "Template" }')!
-	cache_dir := os.join_path(root, 'cache')
-
-	first := cached_source_signature(cache_dir, 'vml-shadow', [source])
-	assert first.len > 0
-	paths, lookups, candidates, unresolved := compile_time_vml_paths(os.read_file(source)!, source)
-	assert paths == [os.real_path(template_vml)]
-	assert lookups == [os.join_path(os.real_path(root), 'templates', 'form.vml')]
-	assert candidates == [direct_candidate]
-	assert !unresolved
-	details := source_signature_details([source], '', '')
-	assert details.validation.any(it == 'vmlcandidate=${direct_candidate}\tmissing')
-
-	os.write_file(direct_vml, 'Label { text: "Direct" }')!
-	second := cached_source_signature(cache_dir, 'vml-shadow', [source])
-	assert second.len > 0
-	assert second != first
-	shadowing_paths, shadowing_lookups, shadowing_candidates, _ := compile_time_vml_paths(os.read_file(source)!, source)
-	assert shadowing_paths == [os.real_path(direct_vml)]
-	assert shadowing_lookups == [direct_candidate]
-	assert shadowing_candidates.len == 0
-}
-
-fn test_cached_source_signature_tracks_vml_symlink_target() {
-	root := os.join_path(os.vtmp_dir(), 'v3_modulecache_vml_symlink_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(root) or { panic(err) }
-	defer {
-		os.rmdir_all(root) or {}
-	}
-	source := os.join_path(root, 'main.v')
-	first_target := os.join_path(root, 'first.vml')
-	second_target := os.join_path(root, 'second.vml')
-	vml_link := os.join_path(root, 'form.vml')
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form.vml') }\n")!
-	os.write_file(first_target, 'Label { text: "First" }')!
-	os.write_file(second_target, 'Label { text: "Second" }')!
-	os.symlink(first_target, vml_link) or { return }
-	cache_dir := os.join_path(root, 'cache')
-
-	first := cached_source_signature(cache_dir, 'vml-symlink', [source])
-	assert first.len > 0
-	lookup_path := os.join_path(os.real_path(root), 'form.vml')
-	details := source_signature_details([source], '', '')
-	assert details.validation.any(it.starts_with('vmllookup=${lookup_path}\t${os.real_path(first_target)}\t'))
-
-	os.rm(vml_link)!
-	os.symlink(second_target, vml_link)!
-	second := cached_source_signature(cache_dir, 'vml-symlink', [source])
-	assert second.len > 0
-	assert second != first
-}
-
 // without_file_metadata makes file_metadata_signature report nothing for
 // `paths`, as it does for a file without a usable identity, and returns the
 // previous setting for restore_file_metadata.
@@ -771,9 +668,9 @@ fn test_file_change_signature_falls_back_to_the_contents() {
 	defer {
 		os.rmdir_all(root) or {}
 	}
-	with_metadata := os.join_path(root, 'with_metadata.vml')
-	without_metadata := os.join_path(root, 'without_metadata.vml')
-	absent := os.join_path(root, 'absent.vml')
+	with_metadata := os.join_path(root, 'with_metadata.txt')
+	without_metadata := os.join_path(root, 'without_metadata.txt')
+	absent := os.join_path(root, 'absent.txt')
 	os.write_file(with_metadata, 'first')!
 	os.write_file(without_metadata, 'first')!
 	old, was_set := without_file_metadata([without_metadata, absent])
@@ -791,45 +688,6 @@ fn test_file_change_signature_falls_back_to_the_contents() {
 	assert file_change_signature(absent) == 'missing'
 	os.write_file(absent, 'appeared')!
 	assert !file_change_signature_matches(absent, 'missing')
-}
-
-// A source file on a file system with file identities can depend on inputs on one
-// without them. Edits to those inputs, and inputs that appear there, must still
-// invalidate the memoized source signature.
-fn test_cached_source_signature_tracks_vml_inputs_without_file_metadata() {
-	root := os.join_path(os.vtmp_dir(), 'v3_modulecache_vml_no_metadata_${os.getpid()}')
-	os.rmdir_all(root) or {}
-	os.mkdir_all(os.join_path(root, 'templates')) or { panic(err) }
-	defer {
-		os.rmdir_all(root) or {}
-	}
-	source := os.join_path(root, 'main.v')
-	template_vml := os.join_path(root, 'templates', 'form.vml')
-	direct_vml := os.join_path(root, 'form.vml')
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form.vml') }\n")!
-	os.write_file(template_vml, 'Label { text: "First" }')!
-	old, was_set := without_file_metadata([template_vml, direct_vml])
-	defer {
-		restore_file_metadata(old, was_set)
-	}
-	assert file_metadata_signature(source) != ''
-	assert file_metadata_signature(template_vml) == ''
-	cache_dir := os.join_path(root, 'cache')
-
-	first := cached_source_signature(cache_dir, 'vml-no-metadata', [source])
-	assert first.len > 0
-	assert source_signature_details([source], '', '').cacheable
-	assert cached_source_signature(cache_dir, 'vml-no-metadata', [source]) == first
-
-	os.write_file(template_vml, 'Label { text: "Other" }')!
-	second := cached_source_signature(cache_dir, 'vml-no-metadata', [source])
-	assert second.len > 0
-	assert second != first
-
-	os.write_file(direct_vml, 'Label { text: "Direct" }')!
-	third := cached_source_signature(cache_dir, 'vml-no-metadata', [source])
-	assert third.len > 0
-	assert third != second
 }
 
 fn test_cached_source_signature_tracks_vmod_edits_without_file_metadata() {
@@ -870,20 +728,15 @@ fn test_cached_source_signature_tracks_edits_within_a_coarse_timestamp_step() {
 		os.rmdir_all(root) or {}
 	}
 	source := os.join_path(root, 'main.v')
-	template_vml := os.join_path(root, 'form.vml')
-	os.write_file(source, "module main\n\nfn build() { _ = \$vml('form.vml') }\n")!
-	old_time := time.utc().unix() - 600
-	os.utime(source, old_time, old_time)!
-	assert file_metadata_signature(source) != ''
 	step := time.utc().unix()
-	os.write_file(template_vml, 'Label { text: "First" }')!
-	os.utime(template_vml, step, step)!
+	os.write_file(source, "module main\n\nconst label = 'First'\n")!
+	os.utime(source, step, step)!
 	cache_dir := os.join_path(root, 'cache')
 
 	first := cached_source_signature(cache_dir, 'coarse-mtime', [source])
 	assert first.len > 0
-	os.write_file(template_vml, 'Label { text: "Other" }')!
-	os.utime(template_vml, step, step)!
+	os.write_file(source, "module main\n\nconst label = 'Other'\n")!
+	os.utime(source, step, step)!
 	second := cached_source_signature(cache_dir, 'coarse-mtime', [source])
 	assert second.len > 0
 	assert second != first

@@ -13,8 +13,8 @@ fn test_array_new_selects_noscan_for_scalar_elements() {
 	})
 	len_expr := t.make_int_literal(3)
 	cap_expr := t.make_int_literal(7)
-	for elem_type in ['f64', 'f32', 'int', 'u8', 'bool', 'char', 'rune', 'isize', 'usize', 'ScalarAlias',
-		'ScalarAliasChain'] {
+	for elem_type in ['f64', 'f32', 'int', 'u8', 'bool', 'char', 'rune', 'uint', 'ScalarAlias',
+		'ScalarAliasChain', '?f64'] {
 		id := t.make_array_new_call(flat.source_type_id(elem_type), len_expr, cap_expr)
 		call := a.nodes[int(id)]
 		assert call.kind == .call
@@ -24,24 +24,28 @@ fn test_array_new_selects_noscan_for_scalar_elements() {
 		assert a.child(&call, 1) == len_expr
 		assert a.child(&call, 2) == cap_expr
 		assert a.child_node(&call, 3).kind == .sizeof_expr
-		assert a.child_node(&call, 3).value == elem_type
+		assert a.child_node(&call, 3).source_value_id() == flat.source_type_id(elem_type)
 	}
 	assert t.used_fns['__new_array_noscan']
-	assert array_element_can_use_noscan(types.Enum{ name_id: flat.source_type_id('ScalarEnum') })
+	enum_type := types.Type(types.Enum{ name_id: flat.source_type_id('ScalarEnum') })
+	assert !tc.allocation_layout(enum_type).has(.scanned)
 }
 
 fn test_array_new_keeps_pointer_bearing_and_unknown_elements_scanned() {
 	mut a := flat.FlatAst.new()
 	mut tc := types.TypeChecker.new(&a)
 	tc.type_aliases.set_id('PointerAlias', flat.source_type_id('&f64'))
-	tc.structs['PointerValue'] = []types.StructField{}
+	tc.structs['PointerValue'] = [types.StructField{
+		name: 'pointer'
+		typ:  *tc.parse_type(flat.source_type_id('&f64'))
+	}]
 	mut t := new_transformer(mut a, &tc, {
 		'main': true
 	})
 	len_expr := t.make_int_literal(2)
 	cap_expr := t.make_int_literal(5)
 	for elem_type in ['[]f64', 'string', '&f64', 'voidptr', 'PointerAlias', 'PointerValue',
-		'map[string]int', '?f64', 'fn ()', 'shared int', 'UnresolvedElement'] {
+		'map[string]int', 'fn ()', 'shared int', 'UnresolvedElement'] {
 		id := t.make_array_new_call(flat.source_type_id(elem_type), len_expr, cap_expr)
 		call := a.nodes[int(id)]
 		assert a.child_node(&call, 0).value == 'array_new'
@@ -51,7 +55,7 @@ fn test_array_new_keeps_pointer_bearing_and_unknown_elements_scanned() {
 		} else {
 			elem_type
 		}
-		assert a.child_node(&call, 1).value == expected_size_type
+		assert a.child_node(&call, 1).source_value_id() == flat.source_type_id(expected_size_type)
 		assert a.child(&call, 2) == len_expr
 		assert a.child(&call, 3) == cap_expr
 	}

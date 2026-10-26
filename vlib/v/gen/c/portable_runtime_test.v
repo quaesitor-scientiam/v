@@ -6,6 +6,26 @@ import v.flat
 import v.pref
 import v.types
 
+fn test_allocation_runtime_prototypes_match_legacy_and_modern_sizes() {
+	for size in [types.Type(types.int_), types.Type(types.isize_)] {
+		mut ast := flat.FlatAst.new()
+		mut tc := types.TypeChecker.new(&ast)
+		tc.fn_param_types['malloc_noscan'] = [size]
+		tc.fn_param_types['memdup'] = [types.Type(types.voidptr_), size]
+		tc.fn_param_types['memdup_align'] = [types.Type(types.voidptr_), size, size]
+		mut g := FlatGen.new()
+		g.a = &ast
+		g.tc = &tc
+		g.has_builtins = true
+		g.builtin_abi_decls()
+		code := g.sb.str()
+		ct := tc.c_type(size)
+		assert code.contains('u8* malloc_noscan(${ct} n);'), code
+		assert code.contains('void* memdup(void* src, ${ct} sz);'), code
+		assert code.contains('void* memdup_align(void* src, ${ct} sz, ${ct} alignment);'), code
+	}
+}
+
 fn test_partial_c_closure_view_keeps_the_v_runtime_layout() {
 	mut ast := flat.FlatAst.new()
 	mut tc := types.TypeChecker.new(&ast)
@@ -257,4 +277,35 @@ fn test_portable_gc_helper_preserves_linux_header_linkage() ! {
 	text := os.read_file(output)!
 	assert text.contains('v_gc_can_register_main_data_roots_impl'), text
 	assert !text.contains('static inline static')
+}
+
+fn test_linux_gettid_respects_header_and_headerless_syscall_declarations() ! {
+	cc := os.find_abs_path_of_executable('clang') or { return }
+	mut g := FlatGen.new()
+	g.libc_compat_fns['gettid'] = true
+	g.libc_compat_decls()
+	code := g.sb.str()
+	root := os.join_path(os.vtmp_dir(), 'linux_gettid_declarations_${os.getpid()}')
+	os.mkdir_all(root)!
+	defer { os.rmdir_all(root) or {} }
+	for system_headers in [false, true] {
+		source := os.join_path(root, '${system_headers}.c')
+		output := os.join_path(root, '${system_headers}.i')
+		// Model the declaration supplied by unistd.h before object output applies
+		// internal_linkage. No Linux SDK or Linux runtime is needed for this check.
+		prefix := if system_headers {
+			'#define V_MANUAL_STDLIB_HEADERS 1\nlong syscall(long number, ...);\n#pragma clang attribute push (__attribute__((internal_linkage)), apply_to = function)\n'
+		} else {
+			''
+		}
+		os.write_file(source, '#define __linux__ 1\n#define SYS_gettid 178\ntypedef unsigned int u32;\n' +
+			prefix + code + if system_headers { '\n#pragma clang attribute pop\n' } else { '' })!
+		preprocessed := cmdexec.run(cc, ['-E', '-P', '-o', output, source])
+		assert preprocessed.exit_code == 0, preprocessed.output
+		text := os.read_file(output)!
+		assert text.count('long syscall(long number, ...);') == 1, text
+		assert text.contains('return (u32)syscall(178);'), text
+		checked := cmdexec.run(cc, ['-fsyntax-only', '-Werror=implicit-function-declaration', source])
+		assert checked.exit_code == 0, checked.output
+	}
 }

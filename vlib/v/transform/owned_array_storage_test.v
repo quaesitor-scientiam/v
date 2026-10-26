@@ -1,3 +1,4 @@
+// vtest ownership
 module transform
 
 import os
@@ -213,7 +214,7 @@ fn check_owned_array_result_branch(a &flat.FlatAst, branch_id flat.NodeId) {
 	assignment := a.child_node(&failure_block, 0)
 	assert assignment.kind == .assign && assignment.skip_ownership_drops()
 	failed := a.child_node(assignment, 1)
-	assert failed.kind == .struct_init && failed.value == '![]Res'
+	assert failed.kind == .struct_init && failed.source_value_id() == flat.source_type_id('![]Res')
 	assert failed.children_count == 2
 	ok_field := a.child_node(failed, 0)
 	assert ok_field.value == 'ok' && a.child_node(ok_field, 0).value == 'false'
@@ -316,4 +317,37 @@ fn test_blank_assignment_has_no_previous_owner_to_drop() {
 	assert statements.len == 1
 	assert a.nodes[int(statements[0])].kind == .assign
 	assert owned_array_storage_call_count(&a, statements[0], 'drop_owned') == 0
+}
+
+fn test_owned_sum_array_pointer_variants_keep_the_mutable_caller_header() {
+	$if !ownership ? {
+		return
+	}
+	for target in ['PointerStorage', 'MixedStorage', 'NestedStorage', 'PointerAliasStorage',
+		'DirectValueStorage'] {
+		mut a := flat.FlatAst.new()
+		mut tc := types.TypeChecker.new(&a)
+		configure_owned_array_storage_checker(mut tc)
+		tc.type_aliases.set('ArrayReference', '&[]Res')
+		names := ['PointerStorage', 'ValueStorage', 'MixedStorage', 'NestedStorage',
+			'PointerAliasStorage', 'DirectValueStorage']
+		variants := [['&[]Res', 'int'], ['[]Res', 'bool'], ['[]Res', '&[]Res'],
+			['ValueStorage', 'PointerStorage'], ['ArrayReference', 'int'], ['[]Res', 'PointerStorage']]
+		for index, name in names { tc.sum_types.set(name, variants[index]) }
+		mut t := new_transformer(mut a, &tc, map[string]bool{})
+		for index, name in names { t.sum_types.set(name, variants[index]) }
+		t.set_var_type('values', flat.source_type_id('&[]Res'))
+		t.mut_param_values['values'] = true
+		wrapped := t.wrap_sum_value_for_storage(t.make_ident('values'), flat.source_type_id(target))
+		assert a.nodes[int(wrapped)].kind == .struct_init
+		mut clones := owned_array_storage_call_count(&a, wrapped, default_clone_helper_name(flat.source_type_id('[]Res')))
+		mut heap_headers := owned_array_storage_call_count(&a, wrapped, 'v3_heap_array')
+		for statement in t.pending_stmts {
+			clones += owned_array_storage_call_count(&a, statement, default_clone_helper_name(flat.source_type_id('[]Res')))
+			heap_headers += owned_array_storage_call_count(&a, statement, 'v3_heap_array')
+		}
+		// Direct value matching wins over the nested pointer alternative and still clones.
+		assert clones == if target == 'DirectValueStorage' { 1 } else { 0 }
+		assert heap_headers == 0
+	}
 }

@@ -108,7 +108,7 @@ fn main() {}
 	assert hits >= 8
 	assert no_hits == 0
 	assert actual == expected
-	assert actual.contains('Count__plus(')
+	assert actual.contains('__v3_internal_symbol_op_Count__plus(')
 	assert actual.contains('string__plus(')
 }
 
@@ -188,9 +188,9 @@ fn main() {}
 	actual, _ := numeric_infix_fixture_c(source, true)
 	expected, _ := numeric_infix_fixture_c(source, false)
 	assert actual == expected
-	assert actual.contains('Count__plus(')
-	assert actual.contains('Count__eq(')
-	assert actual.contains('Count__lt(')
+	assert actual.contains('__v3_internal_symbol_op_Count__plus(')
+	assert actual.contains('__v3_internal_symbol_op_Count__eq(')
+	assert actual.contains('__v3_internal_symbol_op_Count__lt(')
 }
 
 fn test_checked_numeric_infix_preserves_value_branches_and_wide_operations() {
@@ -314,10 +314,10 @@ fn test_checked_numeric_infix_keeps_named_annotations_and_casts_on_operator_path
 	assert t.checked_numeric_infix_can_skip_handlers(a.nodes[int(id)])
 	a.nodes[int(lhs)].typ = u32(0)
 	a.nodes[int(lhs)].kind = .cast_expr
-	a.nodes[int(lhs)].value = 'Count'
+	a.nodes[int(lhs)].set_source_value_id(flat.source_type_id('Count'))
 	assert flat.source_type_name(t.operator_alias_type_for_operand(lhs, .plus) or { u32(0) }) == 'Count'
 	assert !t.checked_numeric_infix_can_skip_handlers(a.nodes[int(id)])
-	a.nodes[int(lhs)].value = 'int'
+	a.nodes[int(lhs)].set_source_value_id(flat.source_type_int)
 	assert t.checked_numeric_infix_can_skip_handlers(a.nodes[int(id)])
 }
 
@@ -367,7 +367,7 @@ fn main() {}
 	actual, _ := numeric_infix_fixture_c(source, true)
 	expected, _ := numeric_infix_fixture_c(source, false)
 	assert actual == expected
-	assert actual.contains('Count__minus(')
+	assert actual.contains('__v3_internal_symbol_op_Count__minus(')
 	assert actual.contains('string__plus(')
 	assert actual.contains('string__lt(')
 	assert actual.contains('__v_u128_')

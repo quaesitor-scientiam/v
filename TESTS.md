@@ -23,6 +23,10 @@ It works, by running these in succession:
 * `v check-md -hide-warnings .`
 * `v install nedpals.args`
 
+The self-build checks include serial transformation and C generation with `-no-parallel`.
+Transformation always runs in the current compiler; the historical `-new-transformer` switch
+is no longer needed.
+
 # Details:
 
 In the `v` repo there are many tests. The main types are:
@@ -222,6 +226,8 @@ The driver can run `make v1` automatically when needed. If it reports that no us
 found and make is unavailable, install GNU make and run the preparation command above. This is a
 missing test prerequisite, and also affects the complete `v test vlib/v/` run, which includes this
 suite. After installation, a usable cached compatibility compiler can run without make.
+Successful automatic installation keeps progress output out of exact-output fixture diagnostics.
+If installation fails, the driver prints the installer output to explain the missing prerequisite.
 
 Use `-new-compiler` when investigating an individual fixture with the current compiler. It overrides
 explicit legacy fixture selection, so its diagnostics need not match that fixture's existing `.out`
@@ -262,6 +268,16 @@ the failing tests too.
 NB 6: Set `VTEST_SKIP_OWNERSHIP=1` to omit ownership and autofree tests from
 `v test`, `v test-self`, and `vlib/v/test_all.vsh`. GitHub Actions enables this
 behavior automatically while ownership/autofree coverage is disabled there.
+A `_test.v` file is an ownership/autofree test when it is in an `ownership`
+folder, its name contains `ownership` or `autofree`, its `// vtest vflags:` line
+has `-ownership`, `-autofree` or `-d ownership`, or it has this line:
+```v ignore
+// vtest ownership
+```
+Add that line to a test that builds the ownership compiler, or compiles with one
+of those flags (for example with `os.exec([vexe, '-ownership', ...])`). Flags
+elsewhere in a test's source are not enough, since many tests pass them only to
+check how they are parsed or rejected.
 
 ## `.github/workflows/ci.yml`
 

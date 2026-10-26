@@ -301,8 +301,9 @@ compiler uses the small `v.fastcdriver` entry point and can build further FastC 
 the flat AST or conventional C backend. Set `V_MACOS_V3_NO_FALLBACK=1` while validating a chain to
 turn any attempted compatibility fallback into a hard failure.
 
-Set `FASTC_BENCH=1` when running a FastC self-host compiler to print the generation time and
-`loc/s` for its input (`FASTC_BENCH_REPEAT=N` reports the best of N child runs).
+Set `FASTC_BENCH=1` when running a standalone FastC self-host compiler to print generation time
+and generation-only `loc/s`. `FASTC_BENCH_REPEAT=N` reports the fastest generation of N child
+runs. These generation rates exclude TinyCC compilation and linking.
 `FASTC_BENCH_PHASES=1` prints the time of every generation phase, `FASTC_BENCH_FILES=1` the
 generation time of every source file, and `FASTC_BENCH=1 FASTC_BENCH_LOOP=N` repeats generation N
 times in-process so an external sampler can profile it. The compiler's own C preamble and runtime
@@ -310,10 +311,31 @@ times in-process so an external sampler can profile it. The compiler's own C pre
 take effect one generation later: measure the compiler built by the modified compiler, not the
 modified compiler itself.
 
-`FASTC_BENCH=1` also prints end-to-end MLOC/s. The FastC total includes TinyCC compilation and
-linking; the direct ARM64 total includes Mach-O generation, linking, and signing.
-For the optimized FastC pipeline, build the full compiler with `./v -prod -o ./vnew cmd/v`, then run
-`FASTC_BENCH=1 ./vnew -nocache -b fastc -selfhost -o /tmp/v3-fastc vlib/v/v.v`.
+`FASTC_BENCH=1` also prints a FastC total that includes TinyCC compilation and linking.
+The direct ARM64 total includes Mach-O generation, linking, and signing.
+The standalone `vlib/v/v.v` self-host workload retains only the FastC driver and backend:
+
+```sh
+./v -prod -cc clang -o ./vnew cmd/v
+FASTC_BENCH=1 ./vnew -nocache -b fastc -selfhost -o /tmp/v3-fastc vlib/v/v.v
+```
+
+Compiling the full `cmd/v` CLI with its default backend selection is a larger workload.
+Build the production host compiler once, then use the same binary and source snapshot for
+FastC and normal C backend measurements. On macOS, an external timer includes process startup,
+TinyCC compilation, linking, signing, final output publication, and process exit:
+
+```sh
+./v -prod -cc clang self
+FASTC_BENCH=1 /usr/bin/time -l ./v -b fastc -nocache -o /tmp/v-fastc cmd/v
+/usr/bin/time -l ./v -b c -cc tcc -nocache -o /tmp/v-c cmd/v
+```
+
+Divide physical lines in each build's selected V sources by the external elapsed time.
+The full CLI's internal FastC total omits early command-line processing and final output
+publication.
+`-nocache` makes both backends rebuild their generated C; record resolver memo usage separately.
+See [FastC throughput measurements](../../doc/fastc.md) for warmups, paired runs, and cache policy.
 
 Self-host generations box `?`/`!` payloads out of a per-thread bump chunk rather than `malloc`, keep
 one file record per scanner pass, and honor `@[direct_array_access]` for string and array indexing.
@@ -565,7 +587,9 @@ the V temporary directory by default; set `V3CACHE` to select another root, or p
 object cache. An explicit `-b c` binary build also retains the complete generated translation unit
 at `<output>.c` for codegen inspection. Use `-show-timings` to print elapsed time for each compiler
 stage and the total, including memory usage and cache metrics. It enables the same benchmark
-summary as `-v` without verbose compiler traces. `-silent` and generated C output to stdout
+summary as `-v` without verbose compiler traces. For self-host builds, `-v` also reports
+time spent preparing markused, marking reachable symbols, and waiting for transform preparation.
+`-silent` and generated C output to stdout
 (`-o -`) suppress the summary. The benchmark output prints counts for parsed `.vh` and
 `.v` files and their total
 line counts immediately after the parse stage, followed by each category's space-separated paths
@@ -662,6 +686,12 @@ full: `-g`, `-cg`, `-keepc`, `-showcc`, `-show-c-output`, shared libraries, obje
 coverage, tests, and an implicit `run` on macOS, which has its own executable cache below.
 `V3_CACHE_TRACE=1` says why an executable was not restored, and
 `V3_CACHE_DISABLE_PROGRAM_EXECUTABLE=1` turns the restoring off. Windows targets always link.
+The experimental unchanged-build receipt is disabled by default. Set
+`V3_ENABLE_UNCHANGED_BUILD_CACHE=1` to enable its early executable restore for explicit binary
+outputs. Its key does not yet cover all compile-time environment, module-search, and linker
+inputs, so it can reuse stale output when those inputs change. `-nocache` and
+`V3_DISABLE_UNCHANGED_BUILD_CACHE=1` both disable this shortcut. Missing file metadata also
+prevents publishing or restoring a receipt.
 The cache resolves the path of each module source once for a build; the table of resolved paths
 is closed when the imports are resolved, before later stages read it from several threads.
 A build that reads every module from its interface gets all the functions of those modules as
@@ -693,6 +723,10 @@ macOS (`-cc cc` without `-prod`), tests, `-autofree` builds and Windows targets 
 declaration, and so do a program that imports `v.reflection`, which can list its functions when
 it runs, and any build with `V3_CACHE_ALL_DECLARATIONS=1`. `V3_CACHE_TRACE=1` prints
 how many were left out, and `V3_CACHE_KEEP_PROGRAM_C=<file>` keeps the unit that TinyCC compiled.
+Cached interface declarations retain local implementing methods and the functions they call,
+even when the dispatch occurs only inside a cached body. Sum-type receivers use the same indirect
+parameter convention as ordinary calls. When a cached dependency imports the module under test,
+its concrete functions remain available to that dependency's object file.
 With module caching, TinyCC used to read the headers of the C library for every program unit: 3.7 MB
 for a unit of 113 KB. The part of the unit that includes them, up to the last `#include`, is now
 kept in the module cache in preprocessed form (`tcc -E -dD`), and the unit includes that file
@@ -987,6 +1021,13 @@ library instance body. Other values use reachability to omit irrelevant library 
 Set `V3_NO_CHECKED_NUMERIC_INFIX=1` to disable the checked numeric infix shortcut during
 both initial function lowering and later monomorphization. This is a diagnostic control for
 comparing generated C through the full dispatch path; ordinary compilation keeps the shortcut.
+
+### Monomorphization parallelism
+
+Generic specialization stays serial by default. Set `V3_PARALLEL_MONOMORPHIZE=1` to opt in
+when using a GCC- or Clang-built compiler. Parallel specialization remains experimental because
+nested generic-interface instantiations can lose specialization results. TinyCC-built compilers
+always specialize serially; `V3_PARALLEL_MONOMORPHIZE=0` also keeps specialization serial.
 
 ### Transform batch arenas
 

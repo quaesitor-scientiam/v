@@ -35,7 +35,7 @@ fn C._getpid() i32
 // cmd.exe uses when two programs differ only by extension.
 const executable_suffixes = ['.com', '.exe', '.bat', '.cmd', '']
 
-// these consts are declared for parity with the nix version, their values are not used, except for -cross
+// Windows CRT file type and permission bits, also exposed for parity with Unix.
 const s_ifmt = 0xF000 // type of file
 const s_ifdir = 0x4000 // directory
 const s_ifreg = 0x8000 // regular file
@@ -655,6 +655,7 @@ fn windows_execute_command_line(command_line_text string, application_name strin
 	if application_name != '' {
 		application_name_ptr = application_name.to_wide()
 	}
+	windows_avoid_long_temp_env()
 	create_process_ok := C.CreateProcessW(application_name_ptr, command_line_ptr, 0, 0, C.TRUE,
 		C.CREATE_NO_WINDOW, 0, 0, voidptr(&start_info), voidptr(&proc_info))
 	if !create_process_ok {

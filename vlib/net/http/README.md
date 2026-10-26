@@ -66,6 +66,12 @@ If the bounded compressed prefix cannot be decompressed, it retains the encoded 
 ordinary response parsing. The client still reads the full response and invokes progress callbacks,
 so streaming downloads can keep a bounded preview without losing data in the callbacks.
 
+With HTTP/2 negotiation disabled, returning an error from `on_progress` or `on_progress_body`
+stops an HTTP/1.1 request without retrying or replaying it, including on a reused connection.
+The caller receives the original callback error with its type and code preserved. This also
+applies when connection reuse is disabled. The Windows Schannel backend with connection reuse
+disabled supports `on_progress`; it does not invoke `on_progress_body`.
+
 An HTTP/2 or HTTP/3 response with a field that can not be delivered is an error, not a
 response without that field: a field name that is not a token, or a field value with CR, LF
 or NUL, makes the response malformed, and more than `http.max_headers` fields, trailers
@@ -214,6 +220,9 @@ and ``!#$%&'*+-.^_`|~``. For any other name, such as one with a space, `;`, `,`,
 `Header` provides both `CommonHeader` enum access (`get`, `set`, `add`) and
 string access (`get_custom`, `set_custom`, `add_custom`). `http.parse_form`,
 `http.parse_multipart_form` and `http.post_multipart_form` cover form bodies.
+`http.parse_form` decodes URL-encoded fields only; it does not detect or decode JSON.
+Select a JSON decoder by the request's content type when handling JSON bodies directly.
+[`veb`](../../veb) makes JSON object fields available in its `ctx.form` map.
 
 A `Header` holds at most `http.max_headers` (50) fields. `add_custom` and `set_custom`
 return an `http.HeaderLimitError` for a field that does not fit, and so do
@@ -227,6 +236,14 @@ these bytes end the field line. `add_custom` and `set_custom` return an
 whose value has a bare CR or a NUL. `add`, `set`, `new_header` and `join` store a space
 in place of each of these bytes. `Request.do` and `http.fetch` return the error for a
 `user_agent` that contains one of them.
+
+The spaces and tabs at the start and end of a field value are optional whitespace, not part
+of the value (RFC 9110 section 5.5). `Header.render` and the HTTP/1 response writers remove
+this edge whitespace. The HTTP/1 request writer also trims values in `Request.header` other
+than `Cookie`: `add_custom('X-Pad', '  padded  ')` is sent as `X-Pad: padded`, as Go's
+`Header.Write` does. The `Request.user_agent` fallback and explicit `Cookie` header values
+are not trimmed. This trimming guarantee does not apply to the HTTP/2 and HTTP/3 writers.
+`get` and `values` still return the value as it was stored.
 
 `Cookie.str()` and `sanitize_cookie_value` remove invalid bytes from cookie values,
 including control characters, quotes, semicolons and backslashes. Spaces and commas
@@ -256,6 +273,10 @@ Before reusing an idle plain TCP connection, the client checks for a server-side
 A closed connection is discarded before sending request bytes, so a POST can use a fresh
 connection safely. Healthy idle connections remain reusable.
 
+Pooled connections expire after `Transport.idle_timeout` without requiring another request.
+A background worker checks idle pools at least once per second and stops when the pools are empty.
+Active HTTP/2 and HTTP/3 streams are preserved. `close_idle_connections()` can flush pools sooner.
+
 If a non-idempotent request fails after transmission starts, the client returns an error
 without replaying it: a missing response does not prove that the server ignored the request.
 
@@ -272,3 +293,39 @@ request headers, method, and body. `-d no_vschannel` continues to select `net.ss
 
 Redirect responses without a `Location` header, or with an empty `Location`, are returned
 to the caller without following another URL.
+
+## Reverse Proxy
+
+`http.new_single_host_reverse_proxy` creates an HTTP reverse proxy that routes incoming
+requests to a target upstream server. It satisfies the `http.Handler` interface:
+
+```v ignore
+import net.http
+
+fn main() {
+	mut rp := http.new_single_host_reverse_proxy('http://127.0.0.1:8080')!
+	mut server := &http.Server{
+		addr:    ':9000'
+		handler: rp
+	}
+	server.listen_and_serve()
+}
+```
+
+The reverse proxy strips hop-by-hop headers (such as `Connection`, `Keep-Alive`,
+`Transfer-Encoding`), manages forwarding headers (`X-Forwarded-For`, `X-Forwarded-Host`,
+`X-Forwarded-Proto`), and supports `director`, `modify_response`, and `error_handler` hooks.
+
+Paths retain percent-encoded separators when joined to the upstream base path. Forwarding
+metadata describes the incoming host and URL scheme, while `preserve_host` controls the
+upstream `Host` header. Relative incoming URLs default to `http`; a TLS terminator should
+set `X-Forwarded-Proto` to `https` in its `director` hook. Existing forwarding headers are
+preserved, so clear or replace values from untrusted clients in that hook before using them
+for authentication or access control. HTTPS upstream certificate validation is enabled.
+
+Requests and responses are buffered by the HTTP client. WebSocket upgrades and other
+protocol tunnels are not supported. A director or response modifier may replace the body;
+its content length is recalculated when its size changes. Response modifiers receive the
+upstream representation, including any content encoding. A hook that changes the representation
+must also update or remove `Content-Encoding`. Response hop headers are removed before the hook;
+the hook is responsible for any headers it adds.

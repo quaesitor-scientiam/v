@@ -2,6 +2,7 @@ module c
 
 import os
 import strings
+import v.cmdexec
 import v.markused
 import v.parser
 import v.pref
@@ -17,14 +18,16 @@ enum CgenModePool {
 }
 
 struct CgenModeOutput {
-	code         string
-	literals     []string
-	fn_names     []string
-	scoped       bool
-	parallel     bool
-	pool_present bool
-	pool_size    int
-	pool_tasks   u64
+	code                string
+	literals            []string
+	fn_names            []string
+	scoped              bool
+	parallel            bool
+	pool_present        bool
+	pool_size           int
+	pool_tasks          u64
+	type_names_present  bool
+	field_index_present bool
 mut:
 	launches      u64
 	launch_errors u64
@@ -113,14 +116,16 @@ fn cgen_mode_generate(path string, pool_mode CgenModePool, no_parallel bool) Cge
 	g.set_scope_parallel_workers(true)
 	code := g.gen_with_used_options(a, used, &tc, no_parallel)
 	mut result := CgenModeOutput{
-		code:         code
-		literals:     g.str_lits.clone()
-		fn_names:     g.used_fn_names.clone()
-		scoped:       g.scope_parallel_workers
-		parallel:     g.parallel_used
-		pool_present: !isnil(a.worker_pool)
-		pool_size:    a.worker_count()
-		pool_tasks:   a.worker_tasks_run()
+		code:                code
+		literals:            g.str_lits.clone()
+		fn_names:            g.used_fn_names.clone()
+		scoped:              g.scope_parallel_workers
+		parallel:            g.parallel_used
+		pool_present:        !isnil(a.worker_pool)
+		pool_size:           a.worker_count()
+		pool_tasks:          a.worker_tasks_run()
+		type_names_present:  !isnil(g.type_name_short_index)
+		field_index_present: !isnil(g.struct_field_index_base)
 	}
 	if !isnil(a.worker_pool) {
 		stats := a.worker_pool.stats()
@@ -152,7 +157,7 @@ fn test_empty_codegen_pool_preserves_serial_literals_and_scoped_bodies() {
 		assert default_mode.literals.contains('constant literal')
 	}
 	// Constants use inline storage even when complete-AST interning is compiled out.
-	assert default_mode.code.contains('source_label = (string){"constant literal", 16, 1};')
+	assert default_mode.code.contains('source_label = (string){(u8*)"constant literal", 16, 1};')
 	field_literal_id := default_mode.literals.index('field default literal')
 	assert field_literal_id >= 0
 	assert default_mode.code.contains('.label = _str_${field_literal_id}')
@@ -201,6 +206,10 @@ fn test_one_job_codegen_keeps_a_lazy_pool_and_matches_explicit_serial() {
 	defer { os.rm(path) or {} }
 	serial := cgen_mode_generate(path, .lazy, true)
 	default_mode := cgen_mode_generate(path, .lazy, false)
+	assert serial.type_names_present
+	assert default_mode.type_names_present
+	assert !serial.field_index_present
+	assert !default_mode.field_index_present
 	assert default_mode.code == serial.code
 	assert default_mode.literals == serial.literals
 	assert default_mode.fn_names == serial.fn_names
@@ -254,5 +263,93 @@ fn test_multijob_codegen_preserves_lazy_pool_creation() {
 		if default_mode.pool_size > 0 {
 			assert default_mode.parallel
 		}
+	}
+}
+
+// The generated C must not depend on how many jobs the compiler uses. Later
+// stages append synthesized nodes, here the `typeof(x).name` literals of the
+// `name_of[T]` instances, in the order their parallel workers finish; only
+// function bodies use the closures' `fn (i64) i64` type, which a declaration
+// task running beside the body workers cannot see; and the serial transform
+// reaches the `Shape` equality helper with a temporary counter that the
+// consts advanced.
+fn test_generated_c_does_not_depend_on_the_job_count() {
+	test_dir := os.join_path(os.vtmp_dir(), 'cgen_job_count_independent_${os.getpid()}')
+	os.mkdir_all(test_dir) or { panic(err) }
+	defer {
+		os.rmdir_all(test_dir) or {}
+	}
+	// Enough functions for the parallel transform and the parallel cgen dispatch.
+	fn_count := 160
+	mut source := strings.new_builder(60_000)
+	source.writeln('module main
+
+struct Point {
+	x int
+	y string
+}
+
+type Shape = Point | int
+
+const points = [Point{
+	x: 1
+	y: "a"
+}]
+const lookup = {
+	"a": 1
+}
+
+fn name_of[T](x T) string {
+	return typeof(x).name
+}
+
+fn same(a Shape, b Shape) bool {
+	return a == b
+}
+')
+	for i in 0 .. fn_count {
+		source.writeln('struct Left${i} {
+	x int
+}
+
+struct Right${i} {
+	y string
+}
+
+type Pick${i} = Left${i} | Right${i}
+
+fn work_${i}(n i64) string {
+	p := if n > ${i} { Pick${i}(Left${i}{ x: int(n) }) } else { Pick${i}(Right${i}{ y: "r" }) }
+	add := fn [n] (x i64) i64 {
+		return x + n + ${i}
+	}
+	return name_of(p) + "\${add(1)}"
+}
+')
+	}
+	source.writeln('fn main() {\n\tmut total := lookup["a"]')
+	for i in 0 .. fn_count {
+		source.writeln('\ttotal += work_${i}(${i % 7}).len')
+	}
+	source.writeln('\tprintln(same(Shape(points[0]), Shape(total)))\n\tprintln(total)\n}')
+	v_file := os.join_path(test_dir, 'main.v')
+	os.write_file(v_file, source.str()) or { panic(err) }
+	mut first := ''
+	for jobs in ['1', '2', '8'] {
+		c_file := os.join_path(test_dir, 'main_${jobs}.c')
+		generated := cmdexec.run_in_merged_with_env(@VEXE, ['-nocache', '-o', c_file, v_file],
+			test_dir, {
+				'VJOBS': jobs
+			})
+		assert generated.exit_code == 0, 'VJOBS=${jobs}: ${generated.output}'
+		code := os.read_file(c_file) or { panic(err) }
+		assert code.contains('"Pick${fn_count - 1}"'), 'VJOBS=${jobs}'
+		assert code.contains('(*_fn_ptr_'), 'VJOBS=${jobs}'
+		assert code.contains('__sum_eq_res_'), 'VJOBS=${jobs}'
+		if first.len == 0 {
+			first = code
+			continue
+		}
+		assert code == first, 'VJOBS=${jobs} generated different C than VJOBS=1'
 	}
 }

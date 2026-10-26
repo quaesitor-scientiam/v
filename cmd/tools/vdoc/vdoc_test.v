@@ -5,7 +5,7 @@ module main
 import os
 import arrays
 import document as doc
-import markdown
+import x.markdown
 import term
 
 const vexe_path = @VEXE
@@ -185,6 +185,14 @@ fn test_highlight_tokens_map_as_a_builtin() {
 	assert kind_of('a.map(it)', 'map') == 'function'
 }
 
+fn test_highlight_tokens_generic_function() {
+	assert kind_of('fn map_of[T](x T) T', 'map_of') == 'function'
+	assert kind_of('decode[Config](text)', 'decode') == 'function'
+	assert kind_of('pairs[map[string]int](x)', 'pairs') == 'function'
+	// An index is not a call.
+	assert kinds_of('items[0] + items[1]', 'items') == ['name', 'name']
+}
+
 fn test_highlight_tokens_negated_keywords() {
 	assert classify('a in b') == ['a:name', 'in:keyword', 'b:name']
 	assert classify('a !in b') == ['a:name', '!in:keyword', 'b:name']
@@ -234,9 +242,25 @@ fn test_highlight_tokens_qualified_enum_value() {
 	assert kind_of('http.Method.post', 'post') == 'enum_value'
 	// A static method, compile time reflection and C or JS names are not enum values.
 	assert kind_of('Foo.new()', 'new') == 'function'
+	assert kind_of('fn Sides.from[W](input W) !Sides', 'from') == 'function'
+	assert kind_of('Sides.from[int](3)', 'from') == 'function'
+	assert kind_of('Sides.top[0]', 'top') == 'enum_value'
 	assert kind_of('\$for f in T.fields {}', 'fields') == 'name'
 	assert classify('C.FILE') == ['C:type_name', '.:punctuation', 'FILE:type_name']
 	assert classify('JS.foo') == ['JS:type_name', '.:punctuation', 'foo:name']
+}
+
+fn test_highlight_tokens_keywords_used_as_enum_fields() {
+	// Any keyword can be an enum field.
+	assert classify('enum Fill {\n\tnone\n\ttype = 2\n}') == ['enum:keyword', 'Fill:type_name',
+		'{:punctuation', 'none:name', 'type:name', '=:operator', '2:number', '}:punctuation']
+	assert classify('f = .none') == ['f:name', '=:operator', '.:enum_value', 'none:enum_value']
+	assert kinds_of('Fill.none', 'none') == ['enum_value']
+	assert kind_of('match f {\n\t.none {}\n}', 'none') == 'enum_value'
+	// Elsewhere, they are still keywords.
+	assert kind_of('x := none', 'none') == 'none'
+	assert kind_of('enum Fill {\n\ta\n}\nfn f() {\n\treturn\n}', 'return') == 'keyword'
+	assert kind_of('\$if T is \$enum {\n\treturn 1\n}', 'return') == 'keyword'
 }
 
 fn test_highlight_tokens_field_access_is_not_an_enum_value() {
@@ -572,22 +596,24 @@ fn test_resolve_relative_markdown_link_keeps_absolute_urls() {
 
 fn test_markdown_renderer_resolves_relative_links() ! {
 	base := 'https://github.com/vlang/v/blob/master/vlib/net/html/'
-	mut renderer := markdown.HtmlRenderer{
-		transformer: &MdHtmlCodeHighlighter{
-			relative_link_base: base
+	mut renderer := markdown.HTMLRenderer{
+		opts:          markdown.Options{}
+		link_base:     base
+		link_resolver: fn (b string, url string) string {
+			return resolve_relative_markdown_link(b, url)
 		}
 	}
-	out := markdown.render('More examples in [parser](parser_test.v).', mut renderer)!
+	out := markdown.render('More examples in [parser](parser_test.v).', mut renderer)
 	assert out.contains('<a href="https://github.com/vlang/v/blob/master/vlib/net/html/parser_test.v">')
 }
 
 fn test_prepare_markdown_for_html_preserves_blockquote_linebreaks() ! {
-	mut renderer := markdown.HtmlRenderer{
-		transformer: &MdHtmlCodeHighlighter{}
+	mut renderer := markdown.HTMLRenderer{
+		opts: markdown.Options{}
 	}
-	out := markdown.render(prepare_markdown_for_html('> **Note**\n> line one\n> line two'), mut renderer)!
+	out := markdown.render(prepare_markdown_for_html('> **Note**\n> line one\n> line two'), mut renderer)
 	assert out.contains('<blockquote>')
-	assert out.contains('<strong>Note</strong><br />line one<br />line two')
+	assert out.contains('<strong>Note</strong>')
 }
 
 fn test_prepare_markdown_for_html_skips_fenced_code_blocks() {
@@ -597,16 +623,29 @@ fn test_prepare_markdown_for_html_skips_fenced_code_blocks() {
 
 fn test_markdown_renderer_preserves_wrapped_readme_markdown() ! {
 	input := '1. The basic atomic elements of this regex engine are the tokens.\n   In a query string a simple character is a token.\n\n- The basic element **is the token not the sequence of symbols**,\n  and the most simple token, is a single character.\n\n- `|` **the OR operator acts on tokens,** for example `abc|ebc` is not\n  `abc` OR `ebc`.'
-	mut renderer := markdown.HtmlRenderer{
-		transformer: &MdHtmlCodeHighlighter{}
+	mut renderer := markdown.HTMLRenderer{
+		opts: markdown.Options{}
 	}
-	out := markdown.render(prepare_markdown_for_html(input), mut renderer)!
+	out := markdown.render(prepare_markdown_for_html(input), mut renderer)
 	assert !out.contains('tokens.In')
 	assert !out.contains('mostsimple')
 	assert !out.contains('not<code>abc</code>')
 	assert out.contains('tokens. In a query string a simple character is a token.')
 	assert out.contains('the most simple token')
 	assert out.contains('is not <code>abc</code> OR <code>ebc</code>')
+}
+
+fn test_markdown_renderer_highlights_only_v_code_blocks() ! {
+	input := '```sh\nv run server.v\n```\n\n```cpp\n#include <x>\n```\n\n```V\nos.args\n```\n\n```v ignore\nfn f() {}\n```\n\n```\nfn g() {}\n```'
+	mut renderer := new_doc_markdown_renderer('')
+	out := markdown.render(input, mut renderer)
+	// Code in other languages, or without a language, is shown as it is, and escaped.
+	assert out.contains('<code class="language-sh">v run server.v\n</code>')
+	assert out.contains('<code class="language-cpp">#include &lt;x&gt;\n</code>')
+	assert out.contains('fn g() {}')
+	// The language is the first word of the fence, in any case.
+	assert out.contains('<span class="token module_">os</span>')
+	assert out.contains('<span class="token keyword">fn</span> <span class="token function">f</span>')
 }
 
 fn test_doc_multi_skips_modules_without_valid_files_for_platform() {
@@ -809,8 +848,8 @@ fn test_repo_file_path_for_links_keeps_subdirs() {
 		}
 	}
 	real_root := os.real_path(root)
-	assert vd.get_repo_file_path_for_links(os.join_path(real_root, 'root.v')) == 'root.v'
-	assert vd.get_repo_file_path_for_links(os.join_path(real_root, 'internal', 'sub.v')) == 'internal/sub.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_root, 'root.v')) == 'root.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_root, 'internal', 'sub.v')) == 'internal/sub.v'
 }
 
 fn test_repo_file_path_for_links_keeps_external_subdirs() {
@@ -828,9 +867,9 @@ fn test_repo_file_path_for_links_keeps_external_subdirs() {
 		}
 	}
 	real_repo := os.real_path(repo)
-	assert vd.get_repo_file_path_for_links(os.join_path(real_repo, 'mypkg', 'root.v')) == 'mypkg/root.v'
-	assert vd.get_repo_file_path_for_links(os.join_path(real_repo, 'shared', 'sub.v')) == 'shared/sub.v'
-	assert vd.get_repo_file_path_for_links(os.join_path(real_repo, 'other', 'sub.v')) == 'other/sub.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_repo, 'mypkg', 'root.v')) == 'mypkg/root.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_repo, 'shared', 'sub.v')) == 'shared/sub.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_repo, 'other', 'sub.v')) == 'other/sub.v'
 	res := os.exec_opt([vexe_path, 'doc', '-no-timestamp', '-f', 'html', '-o', '-',
 		'-html-only-contents', '-comments', root])!
 	assert res.output.contains('https://github.com/example/project/blob/main/shared/sub.v#L')
@@ -851,9 +890,9 @@ fn test_repo_file_path_for_links_uses_base_url_manifest_root() {
 		}
 	}
 	real_root := os.real_path(root)
-	assert vd.get_repo_file_path_for_links(os.join_path(real_root, 'src', 'root.v')) == 'src/root.v'
-	assert vd.get_repo_file_path_for_links(os.join_path(real_root, 'src', 'internal', 'sub.v')) == 'src/internal/sub.v'
-	assert vd.get_repo_file_path_for_links(os.join_path(real_root, 'shared', 'sub.v')) == 'shared/sub.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_root, 'src', 'root.v')) == 'src/root.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_root, 'src', 'internal', 'sub.v')) == 'src/internal/sub.v'
+	assert repo_file_path_for_links(vd.links_root(), os.join_path(real_root, 'shared', 'sub.v')) == 'shared/sub.v'
 }
 
 fn test_repo_file_path_for_links_handles_worktrees_and_file_inputs() {
@@ -873,9 +912,9 @@ fn test_repo_file_path_for_links_handles_worktrees_and_file_inputs() {
 				is_multi:   is_multi
 			}
 		}
-		assert vd.get_repo_file_path_for_links('') == ''
-		assert vd.get_repo_file_path_for_links(os.join_path(real_repo, 'mypkg', 'root.v')) == 'mypkg/root.v'
-		assert vd.get_repo_file_path_for_links(os.join_path(real_repo, 'shared', 'sub.v')) == 'shared/sub.v'
+		assert repo_file_path_for_links(vd.links_root(), '') == ''
+		assert repo_file_path_for_links(vd.links_root(), os.join_path(real_repo, 'mypkg', 'root.v')) == 'mypkg/root.v'
+		assert repo_file_path_for_links(vd.links_root(), os.join_path(real_repo, 'shared', 'sub.v')) == 'shared/sub.v'
 	}
 }
 
@@ -898,7 +937,7 @@ fn test_repo_file_path_for_links_preserves_manifestless_input_roots() {
 				}
 			}
 			expected := if is_multi && input_path == root { 'nested/file.v' } else { 'file.v' }
-			assert vd.get_repo_file_path_for_links(os.real_path(file)) == expected
+			assert repo_file_path_for_links(vd.links_root(), os.real_path(file)) == expected
 		}
 	}
 }
@@ -924,7 +963,7 @@ fn test_repo_file_path_for_links_ignores_unrelated_enclosing_checkout() {
 						is_multi:   is_multi
 					}
 				}
-				assert vd.get_repo_file_path_for_links(file) == expected
+				assert repo_file_path_for_links(vd.links_root(), file) == expected
 			}
 		}
 	}
@@ -952,7 +991,7 @@ fn test_repo_file_path_for_links_keeps_manifestless_git_root() {
 					is_multi:   is_multi
 				}
 			}
-			assert vd.get_repo_file_path_for_links(os.real_path(file)) == 'nested/file.v'
+			assert repo_file_path_for_links(vd.links_root(), os.real_path(file)) == 'nested/file.v'
 		}
 	}
 }
@@ -996,4 +1035,45 @@ fn test_vdocignore_applies_to_vmod_subdirs() {
 		assert !output.contains('linked_fn')
 		assert output.contains('fn two_links_fn()')
 	}
+}
+
+fn test_os_cross_labels_the_symbols_of_some_platforms() {
+	dir := os.join_path(os.vtmp_dir(), 'vdoc_os_cross_${os.getpid()}')
+	os.mkdir_all(dir)!
+	defer { os.rmdir_all(dir) or {} }
+	os.write_file(os.join_path(dir, 'plat.v'), 'module plat\n\npub fn everywhere() {}\n')!
+	os.write_file(os.join_path(dir, 'plat_windows.c.v'), 'module plat\n\npub fn on_windows() {}\n')!
+	os.write_file(os.join_path(dir, 'plat_nix.c.v'), 'module plat\n\npub fn on_unix() {}\n')!
+	for platform in ['cross', 'all'] {
+		res := os.exec_opt([vexe_path, 'doc', '-os', platform, '-f', 'text', '-o', '-', dir])!
+		assert res.output.contains('fn everywhere()\n// Available on Unix only.\nfn on_unix()\n// Available on Windows only.\nfn on_windows()\n'), res.output
+	}
+	// In HTML, the note comes right before the signature, which the theme attaches it to.
+	html := os.exec_opt([vexe_path, 'doc', '-os', 'cross', '-f', 'html', '-o', '-',
+		'-html-only-contents', dir])!
+	assert html.output.contains('<p class="platforms">Available on <strong>Windows</strong> only.</p>\n<pre class="signature">'), html.output
+}
+
+fn test_os_cross_shows_the_own_comment_of_each_declaration() {
+	dir := os.join_path(os.vtmp_dir(), 'vdoc_os_cross_variants_${os.getpid()}')
+	os.mkdir_all(dir)!
+	defer { os.rmdir_all(dir) or {} }
+	os.write_file(os.join_path(dir, 'lock_nix.c.v'), 'module lock\n\n// Lock uses pthreads.\n@[heap]\npub struct Lock {\n\tm int\n}\n\npub const spins = 10 // spins before sleeping\n')!
+	os.write_file(os.join_path(dir, 'lock_windows.c.v'), 'module lock\n\n// Lock uses an SRWLOCK.\npub struct Lock {\n\tm voidptr\n}\n\npub const spins = 10 // how often to spin\n')!
+	res := os.exec_opt([vexe_path, 'doc', '-os', 'cross', '-comments', '-f', 'text', '-o', '-',
+		dir])!
+	// A constant that is only written differently is documented once.
+	assert res.output.contains('const spins = 10 // spins before sleeping\n'), res.output
+	assert !res.output.contains('how often to spin'), res.output
+	// Each declaration is followed by its own comment.
+	assert res.output.contains('// Available on Unix only.\n@[heap]\nstruct Lock {\n\tm int\n}\n    Lock uses pthreads.\n// Available on Windows only.\nstruct Lock {\n\tm voidptr\n}\n    Lock uses an SRWLOCK.\n'), res.output
+	// In HTML, each declaration shows its own attributes in its signature, not above all of them.
+	html := os.exec_opt([vexe_path, 'doc', '-os', 'cross', '-f', 'html', '-o', '-',
+		'-html-only-contents', dir])!
+	assert !html.output.contains('<div class="attributes">'), html.output
+	assert html.output.contains('Available on <strong>Unix</strong> only.</p>\n<pre class="signature">\n<code><span class="token attribute">@[</span>'), html.output
+}
+
+fn test_readme_plaintext_preserves_unformatted_terminal_output() {
+	assert readme_plaintext('# Title\n\nA [link](https://vlang.io), **bold**, and `code`.\n\n```v\nfn main() {}\n```') == 'Title\nA link, bold, and code.\nfn main() {}'
 }

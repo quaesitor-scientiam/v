@@ -1,6 +1,8 @@
 @[has_globals]
 module types
 
+import v.flat
+
 // platform_int_c_type is the C spelling emitted for V's platform-width `int`
 // (the `Primitive` with size 0). `int` is 64-bit on 64-bit targets and 32-bit
 // on 32-bit targets, so it lowers to `i64` or `i32` respectively. It defaults to
@@ -8,17 +10,43 @@ module types
 // target is configured; `set_platform_int_bits` updates it for cross builds.
 __global platform_int_c_type = 'i64'
 
+// platform_int_width is the bit width of V's platform `int` on the target that
+// the program is checked for. It is kept apart from the C spelling, because
+// portable C (`-os cross`) spells `int` with `portable_int_c_type`, whatever
+// the width it was checked for.
+__global platform_int_width = 64
+
+// portable_int_c_type is the C spelling of V's `int` in portable C (`-os cross`).
+// The generated C defines it as `i64` or `i32` from the width of the C compiler's
+// target, so one portable file serves 64-bit and 32-bit hosts. Being a name of
+// its own, it also keeps `int` apart from both `i64` and `i32` in the C type
+// names derived from it (`Array_fixed___v_int_4`, `multi_return___v_int_string`).
+pub const portable_int_c_type = '__v_int'
+
 // set_platform_int_bits selects the C spelling for the platform `int` from the
 // target pointer width. The driver calls this once, before checking or code
 // generation, so every `c_type` lowering agrees on the width.
 pub fn set_platform_int_bits(bits int) {
+	platform_int_width = if bits == 32 { 32 } else { 64 }
 	platform_int_c_type = if bits == 32 { 'i32' } else { 'i64' }
+}
+
+// set_portable_platform_int makes `int` lower to `portable_int_c_type`, for
+// portable C whose consumer decides the width. Call it after
+// `set_platform_int_bits`, which still sets the width that checking uses.
+pub fn set_portable_platform_int() {
+	platform_int_c_type = portable_int_c_type
+}
+
+// platform_int_c_spelling returns the C spelling that `int` lowers to.
+pub fn platform_int_c_spelling() string {
+	return platform_int_c_type
 }
 
 // platform_int_bits returns the bit width of V's platform `int` (64 or 32),
 // used for literal-overflow and range checks so they match the emitted width.
 pub fn platform_int_bits() int {
-	return if platform_int_c_type == 'i64' { 64 } else { 32 }
+	return platform_int_width
 }
 
 pub const bool_ = Primitive{
@@ -85,16 +113,13 @@ pub const void_ = Void{}
 pub const nil_ = Nil{}
 pub const none_ = None{}
 pub const voidptr_ = Pointer{
-	base_type: Type(Void{})
+	base_type: &builtin_void_type
 }
 pub const charptr_ = Pointer{
-	base_type: Type(Char{})
+	base_type: &builtin_char_type
 }
 pub const byteptr_ = Pointer{
-	base_type: Type(Primitive{
-		props: .integer | .unsigned
-		size:  8
-	})
+	base_type: &builtin_u8_type
 }
 
 // Reuse immutable builtin payloads instead of boxing a new sum value for every lookup.
@@ -135,6 +160,17 @@ pub fn is_builtin_type_name(name string) bool {
 		7 { name in ['voidptr', 'charptr', 'byteptr'] }
 		else { false }
 	}
+}
+
+// is_builtin_type_name_id reports whether an interned source spelling names a builtin type.
+// Source spelling IDs are distinct from checker-local semantic TypeId values.
+pub fn is_builtin_type_name_id(name_id u32) bool {
+	if flat.source_type_shape(name_id).has(.builtin_alias) {
+		return true
+	}
+	return name_id in [qualify_source_type_map, flat.source_type_nil, flat.source_type_char,
+		qualify_source_type_i128, qualify_source_type_u128, flat.source_type_none,
+		qualify_source_type_array]
 }
 
 // builtin_type_value returns the Type for a known builtin type name.
@@ -204,7 +240,7 @@ pub fn builtin_type_value(name string) Type {
 	}
 	if name == 'array' {
 		return Type(Array{
-			elem_type: Type(Void{})
+			elem_type: new_type_reference(Type(Void{}))
 		})
 	}
 	if name == 'charptr' {
@@ -222,6 +258,48 @@ pub fn builtin_type_value(name string) Type {
 	return Type(Unknown{
 		reason: 'unknown builtin type'
 	})
+}
+
+// builtin_type_value_id returns the Type for an exact interned builtin source spelling.
+// Source spelling IDs are distinct from checker-local semantic TypeId values.
+pub fn builtin_type_value_id(name_id u32) Type {
+	return match name_id {
+		flat.source_type_bool { builtin_bool_type }
+		flat.source_type_int { builtin_int_type }
+		flat.source_type_i8 { builtin_i8_type }
+		flat.source_type_i16 { builtin_i16_type }
+		flat.source_type_i32 { builtin_i32_type }
+		flat.source_type_i64 { builtin_i64_type }
+		flat.source_type_u8 { builtin_u8_type }
+		flat.source_type_u16 { builtin_u16_type }
+		flat.source_type_u32 { builtin_u32_type }
+		flat.source_type_u64 { builtin_u64_type }
+		qualify_source_type_i128 { builtin_i128_type }
+		qualify_source_type_u128 { builtin_u128_type }
+		flat.source_type_f32 { builtin_f32_type }
+		flat.source_type_f64 { builtin_f64_type }
+		flat.source_type_string { builtin_string_type }
+		flat.source_type_char { builtin_char_type }
+		flat.source_type_rune { builtin_rune_type }
+		flat.source_type_isize { builtin_isize_type }
+		qualify_source_type_uint, flat.source_type_usize { builtin_usize_type }
+		flat.source_type_void { builtin_void_type }
+		flat.source_type_voidptr { builtin_voidptr_type }
+		qualify_source_type_array {
+			Type(Array{
+				elem_type: new_type_reference(Type(Void{}))
+			})
+		}
+		flat.source_type_charptr { builtin_charptr_type }
+		flat.source_type_byteptr { builtin_byteptr_type }
+		flat.source_type_nil { builtin_nil_type }
+		flat.source_type_none { builtin_none_type }
+		else {
+			Type(Unknown{
+				reason: 'unknown builtin type'
+			})
+		}
+	}
 }
 
 // builtin_type returns the Type for a builtin type name, or none otherwise.

@@ -17,9 +17,12 @@ set V_OLD=./v_old.exe
 set V_UPDATED=./v_up.exe
 set V_STAGE=./v_stage.exe
 set V_STAGE_C=./v_stage.c
+REM Current vc snapshots declare these Windows helpers as external functions.
+REM Older snapshots embed static definitions, which can coexist with these.
+set V_BOOTSTRAP_NATIVE="%~dp0vlib\time\ticks_windows.c" "%~dp0vlib\v\winthread_helper_windows.c" "%~dp0cmd\v\toolcache_windows_helpers.c"
 REM Native core helpers are cached objects in normal builds. The direct stage
 REM compile must link them too; this stage explicitly uses -gc none.
-set V_STAGE_NATIVE="%~dp0vlib\builtin\core_windows.c" "%~dp0vlib\v\modulecache\file_metadata.c" "%~dp0vlib\time\ticks_windows.c" "%~dp0vlib\v\winthread_helper_windows.c" "%~dp0cmd\v\toolcache_windows_helpers.c" "%~dp0vlib\sync\thread_helper.c"
+set V_STAGE_NATIVE="%~dp0vlib\builtin\core_windows.c" "%~dp0vlib\v\modulecache\file_metadata.c" %V_BOOTSTRAP_NATIVE% "%~dp0vlib\sync\thread_helper.c"
 set V_C_FILE=./vc/v_win.c
 REM Snapshots generated before vlang/v#30606 declare the SDK-backed Windows
 REM helpers (time ticks, Win32 threads, toolcache file/ACL probes) but do not
@@ -168,6 +171,11 @@ if !flag_local! NEQ 1 (
 	echo.
 )
 
+REM Teach pre-uint snapshots the new spelling without changing the download.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0cmd\tools\vc_compat_uint.ps1" -Source "%V_C_FILE%" -Destination "%vc_dir%\v_win_compat.c"
+if !ERRORLEVEL! NEQ 0 goto :error
+set "V_C_FILE=%vc_dir%\v_win_compat.c"
+
 echo Building V...
 if not [!compiler!] == [] goto :!compiler!_strap
 
@@ -254,7 +262,7 @@ if !ERRORLEVEL! NEQ 0 (
 call :build_stage_with_clang
 if !ERRORLEVEL! NEQ 0 goto :compile_error
 echo  ^> Compiling "%V_EXE%" with "%V_STAGE%"
-set updated_vflags=-cc "!clang_exe!" -cflags "--target=!clang_target!"
+set updated_vflags=!clang_vflags!
 "%V_STAGE%" %V_BOOTSTRAP_VFLAGS% -keepc -g -showcc !updated_vflags! -o "%V_UPDATED%" cmd/v
 set stage_error=!ERRORLEVEL!
 call :try_delete "%V_STAGE%"
@@ -382,12 +390,14 @@ echo Backend compiler error
 goto :error
 
 :error
+call :try_delete "%vc_dir%\v_win_compat.c"
 echo.
 echo Exiting from error
 echo ERROR: please follow the instructions in https://github.com/vlang/v/wiki/Installing-a-C-compiler-on-Windows
 exit /b 1
 
 :success
+call :try_delete "%vc_dir%\v_win_compat.c"
 "%V_EXE%" run cmd/tools/detect_tcc.v
 if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
 echo  ^> V built successfully!
@@ -504,13 +514,23 @@ set stage_error=!ERRORLEVEL!
 if !stage_error! NEQ 0 call :try_delete "%V_STAGE%"
 exit /b !stage_error!
 
+:select_tcc_openlibm
+REM Direct TCC links need OpenLibm for C99 math that msvcrt lacks (remainder).
+REM Every Windows TCC bundle ships lib\openlibm.o built for its own compiler, as
+REM vlib/math expects. Use the installed checkout's object before each link: an
+REM existing checkout keeps its branch, so it can differ from tcc_branch.
+set "TCC_OPENLIBM="
+if exist "%tcc_dir%\lib\openlibm.o" set TCC_OPENLIBM="%tcc_dir%\lib\openlibm.o"
+exit /b 0
+
 :build_bootstrap_with_tcc
 if not exist "!tcc_exe!" (
 	echo  ^> TCC not found
 	exit /b 1
 )
+call :select_tcc_openlibm
 echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with "!tcc_exe!"
-"!tcc_exe!" %VC_BOOTSTRAP_DEFINE% -B"%tcc_dir%" -bt10 -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" %V_BOOTSTRAP_NATIVE% -ladvapi32 -lws2_32 -lbcrypt -Wl,-stack=33554432
+"!tcc_exe!" %VC_BOOTSTRAP_DEFINE% -B"%tcc_dir%" -bt10 -g -w -o "%V_BOOTSTRAP%" "%V_C_FILE%" %V_BOOTSTRAP_NATIVE% %TCC_OPENLIBM% -ladvapi32 -lws2_32 -lbcrypt -Wl,-stack=33554432
 exit /b !ERRORLEVEL!
 
 :build_bootstrap_with_msvc
@@ -539,13 +559,40 @@ if [!resolved_exe!] == [] (
 	exit /b 1
 )
 set "clang_exe=!resolved_exe!"
-if "%PROCESSOR_ARCHITECTURE%" == "x86" ( set clang_target=i686-w64-mingw32 ) else ( set clang_target=x86_64-w64-mingw32 )
+REM Keep Clang's installed target and sysroot together. Visual Studio's Clang
+REM has an MSVC SDK, while LLVM-MinGW supplies its own GNU Windows runtime.
+set "clang_target="
+for /f "delims=" %%i in ('""!clang_exe!" -dumpmachine 2^>nul"') do set "clang_target=%%i"
+if [!clang_target!] == [] (
+	echo  ^> Could not determine Clang's default target
+	exit /b 1
+)
+call :configure_clang_target
+if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
 echo  ^> Attempting to build "%V_BOOTSTRAP%" (from %V_C_FILE%) with Clang
-"!clang_exe!" %VC_BOOTSTRAP_DEFINE% --target=!clang_target! -std=c99 -municode -g -w -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -o "%V_BOOTSTRAP%" "%V_C_FILE%" %V_BOOTSTRAP_NATIVE% -ladvapi32 -lws2_32 -lbcrypt -Wl,-stack=33554432
+if !clang_msvc! EQU 1 (
+	"!clang_cl_exe!" /nologo %VC_BOOTSTRAP_DEFINE% /bigobj /MD /utf-8 /w /std:c11 /D_CRT_DECLARE_NONSTDC_NAMES=1 /Fe"%V_BOOTSTRAP%" "%V_C_FILE%" %V_BOOTSTRAP_NATIVE% kernel32.lib user32.lib dbghelp.lib ws2_32.lib bcrypt.lib advapi32.lib /link /STACK:33554432
+) else (
+	"!clang_exe!" %VC_BOOTSTRAP_DEFINE% -std=c99 -municode -g -w -fwrapv -Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types -o "%V_BOOTSTRAP%" "%V_C_FILE%" %V_BOOTSTRAP_NATIVE% -ladvapi32 -lws2_32 -lbcrypt -Wl,--stack=33554432
+)
 if !ERRORLEVEL! NEQ 0 (
-	echo In most cases, compile errors happen because the version of Clang installed is too old
+	echo Clang bootstrap failed for target !clang_target!. Check its Windows SDK, headers, and libraries.
 	"!clang_exe!" --version
 	exit /b 1
+)
+exit /b 0
+
+:configure_clang_target
+set clang_msvc=0
+set clang_vflags=-cc "!clang_exe!"
+if not "!clang_target:msvc=!" == "!clang_target!" (
+	set clang_msvc=1
+	for %%i in ("!clang_exe!") do set "clang_cl_exe=%%~dpiclang-cl.exe"
+	if not exist "!clang_cl_exe!" (
+		echo  ^> Clang targets MSVC but clang-cl.exe was not found beside it
+		exit /b 1
+	)
+	set clang_vflags=-cc "!clang_cl_exe!"
 )
 exit /b 0
 
@@ -563,8 +610,9 @@ exit /b !stage_error!
 set stage_vflags=-cc "!tcc_exe!"
 call :generate_stage_c
 if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
+call :select_tcc_openlibm
 echo  ^> Compiling "%V_STAGE%" from "%V_STAGE_C%" with TCC
-"!tcc_exe!" -B"%tcc_dir%" -bt10 -g -w -o "%V_STAGE%" "%V_STAGE_C%" %V_STAGE_NATIVE% -ldbghelp -lws2_32 -L"%~dp0vlib\crypto\rand\internal\libraries\bcrypt" -lbcrypt -I "%~dp0thirdparty\stdatomic\win" -ladvapi32 -Wl,-stack=33554432
+"!tcc_exe!" -B"%tcc_dir%" -bt10 -g -w -o "%V_STAGE%" "%V_STAGE_C%" %V_STAGE_NATIVE% %TCC_OPENLIBM% -ldbghelp -lws2_32 -L"%~dp0vlib\crypto\rand\internal\libraries\bcrypt" -lbcrypt -I "%~dp0thirdparty\stdatomic\win" -ladvapi32 -Wl,-stack=33554432
 set stage_error=!ERRORLEVEL!
 call :try_delete "%V_STAGE_C%"
 exit /b !stage_error!
@@ -591,11 +639,16 @@ call :try_delete "v_stage.obj"
 exit /b !stage_error!
 
 :build_stage_with_clang
-set stage_vflags=-cc "!clang_exe!" -cflags "--target=!clang_target!"
+set stage_vflags=!clang_vflags!
+if !clang_msvc! EQU 1 set stage_vflags=-cc msvc
 call :generate_stage_c
 if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
 echo  ^> Compiling "%V_STAGE%" from "%V_STAGE_C%" with Clang
-"!clang_exe!" --target=!clang_target! -std=gnu11 -municode -g -w -fwrapv -Wno-int-conversion -o "%V_STAGE%" "%V_STAGE_C%" %V_STAGE_NATIVE% -ldbghelp -lws2_32 -L"%~dp0vlib\crypto\rand\internal\libraries\bcrypt" -lbcrypt -I "%~dp0thirdparty\stdatomic\win" -ladvapi32 -Wl,--stack=33554432
+if !clang_msvc! EQU 1 (
+	"!clang_cl_exe!" /nologo /bigobj /MD /utf-8 /w /std:c11 /D_CRT_DECLARE_NONSTDC_NAMES=1 /Fe"%V_STAGE%" "%V_STAGE_C%" %V_STAGE_NATIVE% kernel32.lib user32.lib dbghelp.lib ws2_32.lib bcrypt.lib advapi32.lib /link /STACK:33554432
+) else (
+	"!clang_exe!" -std=gnu11 -municode -g -w -fwrapv -Wno-int-conversion -o "%V_STAGE%" "%V_STAGE_C%" %V_STAGE_NATIVE% -ldbghelp -lws2_32 -L"%~dp0vlib\crypto\rand\internal\libraries\bcrypt" -lbcrypt -I "%~dp0thirdparty\stdatomic\win" -ladvapi32 -Wl,--stack=33554432
+)
 set stage_error=!ERRORLEVEL!
 call :try_delete "%V_STAGE_C%"
 exit /b !stage_error!

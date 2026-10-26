@@ -134,6 +134,7 @@ fn main() {
 		app.show_current_v_version()
 		app.refresh_cached_modules(cached_modules)
 		app.report_skills()
+		app.report_fmt_hook()
 		return
 	}
 	if os.user_os() == 'windows' {
@@ -158,6 +159,7 @@ fn main() {
 	app.show_current_v_version()
 	app.refresh_cached_modules(cached_modules)
 	app.report_skills()
+	app.report_fmt_hook()
 }
 
 fn (app App) refresh_cached_modules(requests []cache_refresh.Request) {
@@ -302,6 +304,47 @@ fn (app App) report_skills() {
 	}
 }
 
+// report_fmt_hook suggests the pre-commit hook when it would help and is
+// missing: the V checkout holds V files but no hook is installed there.
+// Silent otherwise, so routine `v up` runs stay quiet.
+fn (app App) report_fmt_hook() {
+	top := git_top_level(app.vroot) or { return }
+	if os.exists(os.join_path(top, '.git', 'hooks', 'pre-commit')) {
+		return
+	}
+	if !dir_has_v_files(top) {
+		return
+	}
+	println('Tip: run `v git-fmt-hook install` inside a git repository to format V files automatically before every commit.')
+}
+
+// git_top_level climbs from `start` to the nearest directory holding `.git`.
+fn git_top_level(start string) ?string {
+	mut dir := os.abs_path(start)
+	for _ in 0 .. 255 {
+		if os.is_dir(os.join_path(dir, '.git')) {
+			return dir
+		}
+		parent := os.dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return none
+}
+
+// dir_has_v_files reports whether `dir` itself holds V source files. Only the
+// top level is listed: cheap, and enough to tell a V project from elsewhere.
+fn dir_has_v_files(dir string) bool {
+	for entry in os.ls(dir) or { return false } {
+		if entry.ends_with('.v') || entry.ends_with('.vsh') {
+			return true
+		}
+	}
+	return false
+}
+
 // refresh_skills hands the refresh to `v skills`, which owns the rule for what
 // may be overwritten, so the rule is stated and tested in one place.
 //
@@ -406,8 +449,11 @@ fn (app App) recompile_v() bool {
 	// `os.system` does preserve redirected stdout and stderr through `_wsystem`.
 	mut self_exit_code := -1
 	$if windows {
-		self_exit_code = os.system_args([vexe_path, ...(os.split_args(opts) or { panic(err) }),
-			'self'])
+		opts_args := os.split_args(opts) or { panic(err) }
+		mut self_args := [vexe_path]
+		self_args << opts_args
+		self_args << 'self'
+		self_exit_code = os.system_args(self_args)
 	} $else {
 		mut self_process := os.new_process(vexe_path)
 		self_process.set_args(if app.is_prod { ['-prod', 'self'] } else { ['self'] })

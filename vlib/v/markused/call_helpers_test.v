@@ -138,7 +138,7 @@ fn test_explicit_generic_factory_return_type_retains_receiver_methods() {
 	mut tc := types.TypeChecker.new(&a)
 	tc.fn_generic_params['gates.make_gate'] = ['U']
 	tc.fn_ret_types['gates.make_gate'] = types.Type(types.Pointer{
-		base_type: types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
+		base_type: &types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
 	})
 	arg := a.add_val(.ident, 'T')
 	for imported in [false, true] {
@@ -210,9 +210,12 @@ fn test_generic_factory_inference_uses_call_site_shadowing() {
 			mut tc := types.TypeChecker.new(&a)
 			tc.fn_generic_params['gates.make_gate'] = ['U']
 			tc.fn_ret_types['gates.make_gate'] = types.Type(types.Pointer{
-				base_type: types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
+				base_type: &types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
 			})
-			shadow_name := if imported { 'g' } else { 'make_gate' }
+			// A local cannot take the name of an import alias: the checker reports a
+			// `duplicate of an import symbol`. The alias call keeps its meaning beside a
+			// local of another name.
+			shadow_name := if imported { 'other' } else { 'make_gate' }
 			shadow_lhs := a.add_val(.ident, shadow_name)
 			shadow_rhs := a.add_val(.int_literal, '1')
 			shadow := call_helper_node(mut a, flat.Node{ kind: .decl_assign }, [
@@ -237,11 +240,24 @@ fn test_generic_factory_inference_uses_call_site_shadowing() {
 			}
 			body := call_helper_node(mut a, flat.Node{ kind: .block }, stmts)
 			fn_id := call_helper_node(mut a, flat.Node{ kind: .fn_decl, value: 'use_gate' }, [body])
-			collector := CallCollector{ a: &a, tc: &tc }
+			// Scopes are tracked only for the locals that can also name a function or a
+			// constant, as the declaration indexes of the pass tell.
+			collector := CallCollector{
+				a:           &a
+				tc:          &tc
+				fn_decls:    {
+					'gates.make_gate': FnDeclInfo{
+						module: 'gates'
+					}
+				}
+				fn_suffixes: {
+					'make_gate': true
+				}
+			}
 			_, local_types, _ := collector.local_value_info(a.node(fn_id), 'gates', {
 				'g': 'gates'
 			})
-			assert (local_types.get('gate') or { '' }) == if placement == 'before' {
+			assert (local_types.get('gate') or { '' }) == if placement == 'before' && !imported {
 				''
 			} else {
 				'gates.Gate[T]'
@@ -270,7 +286,7 @@ fn test_checker_selected_generic_selector_factory_return_type() {
 		resolved := if imported_static { 'gates.Gate.make' } else { 'gates.Builder.make' }
 		tc.fn_generic_params[resolved] = ['U']
 		tc.fn_ret_types[resolved] = types.Type(types.Pointer{
-			base_type: types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
+			base_type: &types.Type(types.Struct{ name_id: flat.source_type_id('gates.Gate[U]') })
 		})
 		tc.sparse_resolved_call_names[int(call)] = resolved
 		collector := CallCollector{ a: &a, tc: &tc }
@@ -448,8 +464,8 @@ fn test_join_path_helper_preserves_resolved_and_source_names() {
 				id := call_helper_node(mut a, flat.Node{ kind: .call }, [callee, arg, last_arg])
 				c := CallCollector{ a: &a }
 				mut calls := []string{}
-				c.collect_lowered_join_path_single(a.node(id), resolved, mut calls)
-				if last_arg == arg && (base_name != 'other' || resolved != '') {
+				c.collect_lowered_join_path_single(a.node(id), resolved, map[string]string{}, map[string]bool{}, mut calls)
+				if last_arg == arg && (base_name == 'os' || resolved == 'os.join_path') {
 					assert calls == ['join_path_single', 'os.join_path_single']
 				} else {
 					assert calls.len == 0
@@ -771,8 +787,8 @@ fn test_generic_factory_return_uses_placeholder_signature_text() {
 	for form in ['U', '?U', '!U'] {
 		tc.fn_ret_type_texts.set('gates.identity', form)
 		tc.fn_ret_types['gates.identity'] = match form[0] {
-			`?` { types.Type(types.OptionType{ base_type: unknown }) }
-			`!` { types.Type(types.ResultType{ base_type: unknown }) }
+			`?` { types.Type(types.OptionType{ base_type: &types.Type(unknown) }) }
+			`!` { types.Type(types.ResultType{ base_type: &types.Type(unknown) }) }
 			else { unknown }
 		}
 		collector := CallCollector{ a: &a, tc: &tc }
@@ -798,12 +814,12 @@ fn test_generic_factory_return_uses_nested_placeholder_signature_text() {
 	arg := a.add_val(.ident, 'ReceiverRequest')
 	indexed := call_helper_node(mut a, flat.Node{ kind: .index }, [base, arg])
 	unknown := types.Type(types.Unknown{ reason: 'generic U' })
-	array_unknown := types.Type(types.Array{ elem_type: unknown })
+	array_unknown := types.Type(types.Array{ elem_type: &types.Type(unknown) })
 	for form in ['[]U', '?[]U', '![]U'] {
 		tc.fn_ret_type_texts.set('gates.make', form)
 		tc.fn_ret_types['gates.make'] = match form[0] {
-			`?` { types.Type(types.OptionType{ base_type: array_unknown }) }
-			`!` { types.Type(types.ResultType{ base_type: array_unknown }) }
+			`?` { types.Type(types.OptionType{ base_type: &types.Type(array_unknown) }) }
+			`!` { types.Type(types.ResultType{ base_type: &types.Type(array_unknown) }) }
 			else { array_unknown }
 		}
 		collector := CallCollector{ a: &a, tc: &tc }
@@ -854,14 +870,14 @@ fn test_generic_factory_signature_text_uses_declaration_scope() {
 	unknown := types.Type(types.Unknown{ reason: 'generic U' })
 	tc.fn_ret_types['gates.make'] = types.Type(types.Alias{
 		name_id:   flat.source_type_id('gates.Handler[U]')
-		base_type: unknown
+		base_type: &types.Type(unknown)
 	})
 	tc.fn_ret_type_texts.set('gates.make', 'Handler[U]')
 	assert flat.source_type_name(collector.generic_factory_return_type_name(a.node(indexed), 'gates.make', 'consumer',
 		map[string]string{}, false, u32(0))) == 'gates.Handler[int]'
 	tc.fn_ret_types['gates.make'] = types.Type(types.Map{
-		key_type:   types.Type(types.Struct{ name_id: flat.source_type_id('gates.Key') })
-		value_type: unknown
+		key_type:   &types.Type(types.Struct{ name_id: flat.source_type_id('gates.Key') })
+		value_type: &types.Type(unknown)
 	})
 	tc.fn_ret_type_texts.set('gates.make', 'map[Key]U')
 	assert flat.source_type_name(collector.generic_factory_return_type_name(a.node(indexed), 'gates.make', 'consumer',
@@ -875,7 +891,7 @@ fn test_generic_factory_signature_text_uses_declaration_imports() {
 	tc.fn_generic_params[method] = ['U']
 	tc.fn_ret_types[method] = types.Type(types.Alias{
 		name_id:   flat.source_type_id('external.Handler[U]')
-		base_type: types.Type(types.Unknown{ reason: 'generic U' })
+		base_type: &types.Type(types.Unknown{ reason: 'generic U' })
 	})
 	tc.fn_ret_type_texts.set(method, 'handler.Handler[U]')
 	base := a.add_val(.ident, 'make')
@@ -970,16 +986,16 @@ fn test_generic_factory_infers_semantic_channel_element_types() {
 		markused_infer_alias_generic_type(flat.source_type_id(pattern), actual, ['U'], mut inferred)
 		assert inferred.value('U') == 'Payload', pattern
 	}
-	channel := types.Type(types.Channel{ elem_type: types.Type(types.Struct{ name_id: flat.source_type_id('Payload') }) })
-	for actual in [channel, types.Type(types.Pointer{ base_type: channel }),
-		types.Type(types.Alias{ name_id: flat.source_type_id('Mailbox'), base_type: channel })] {
+	channel := types.Type(types.Channel{ elem_type: &types.Type(types.Struct{ name_id: flat.source_type_id('Payload') }) })
+	for actual in [channel, types.Type(types.Pointer{ base_type: &types.Type(channel) }),
+		types.Type(types.Alias{ name_id: flat.source_type_id('Mailbox'), base_type: &types.Type(channel) })] {
 		mut inferred := flat.TypeTextBindings{}
 		markused_infer_alias_generic_type(flat.source_type_id('chan U'), actual, ['U'], mut inferred)
 		assert inferred.value('U') == 'Payload', actual.name()
 	}
 	for actual in [
-		types.Type(types.Channel{ elem_type: types.Type(types.Unknown{}) }),
-		types.Type(types.Array{ elem_type: types.Type(types.Struct{ name_id: flat.source_type_id('Payload') }) }),
+		types.Type(types.Channel{ elem_type: &types.Type(types.Unknown{}) }),
+		types.Type(types.Array{ elem_type: &types.Type(types.Struct{ name_id: flat.source_type_id('Payload') }) }),
 	] {
 		mut inferred := flat.TypeTextBindings{}
 		markused_infer_alias_generic_type(flat.source_type_id('chan U'), actual, ['U'], mut inferred)
@@ -1021,7 +1037,7 @@ fn test_unindexed_factory_infers_aliased_channel_element_type() {
 fn test_channel_generic_reachability_inference() {
 	mut a := flat.FlatAst.new()
 	tc := types.TypeChecker.new(&a)
-	actual := types.Type(types.Channel{ elem_type: types.Type(types.int_) })
+	actual := types.Type(types.Channel{ elem_type: &types.Type(types.int_) })
 	inferred := tc.infer_generic_reachability_type_args('gates.make_gate', flat.source_type_id('chan U'), actual,
 		['U'])
 	assert inferred['U'] == flat.source_type_int
@@ -1061,7 +1077,7 @@ fn test_repeated_generic_parameter_keeps_first_alias_inference() {
 	for name in ['A', 'B'] {
 		markused_infer_alias_generic_type(flat.source_type_id('U'), types.Type(types.Alias{
 			name_id:   flat.source_type_id(name)
-			base_type: types.Type(types.int_)
+			base_type: &types.Type(types.int_)
 		}), ['U'], mut inferred)
 	}
 	assert inferred.value('U') == 'A'
@@ -1156,7 +1172,7 @@ fn test_generic_factory_uses_custom_iterator_element_type() {
 	tc.fn_ret_types['gates.Gate[T].backward'] = types.Type(types.int_)
 	tc.struct_generic_params['Iter'] = ['T']
 	tc.fn_ret_types['Iter[T].next'] = types.Type(types.OptionType{
-		base_type: types.Type(types.Struct{ name_id: flat.source_type_id('T') })
+		base_type: &types.Type(types.Struct{ name_id: flat.source_type_id('T') })
 	})
 	param := a.add_node(flat.Node{ kind: .param, value: 'iter', typ: flat.source_type_id('Iter[T]') })
 	loop_value := a.add_val(.ident, 'value')
@@ -1973,7 +1989,7 @@ fn test_factory_loop_bindings_use_iterator_next_and_checked_variable_types() {
 		tc.parallel_check_sparse = true
 		tc.structs['Iter'] = []types.StructField{}
 		tc.struct_generic_params['Iter'] = ['U']
-		tc.fn_ret_types['Iter[U].next'] = types.Type(types.OptionType{ base_type: types.Type(types.Struct{ name_id: flat.source_type_id('U') }) })
+		tc.fn_ret_types['Iter[U].next'] = types.Type(types.OptionType{ base_type: &types.Type(types.Struct{ name_id: flat.source_type_id('U') }) })
 		tc.fn_ret_type_texts.set('Iter[U].next', '?U')
 		tc.fn_param_type_texts.set('Iter[U].next', ['&Iter[U]'])
 		tc.type_aliases.set('IteratorAlias', 'Iter[int]')
@@ -2431,4 +2447,133 @@ fn test_receiver_cache_keeps_source_and_semantic_ids_separate() {
 	module_methods.semantic_methods[semantic_key] = 'semantic.read'
 	assert collector.typed_receiver_method_name(source, 'read', 'main')? == 'source.read'
 	assert collector.typed_receiver_method_id(semantic, 'read', 'main')? == 'semantic.read'
+}
+
+fn test_join_path_helper_respects_import_aliases_and_local_bindings() {
+	mut a := flat.FlatAst.new()
+	arg := a.add_val(.string_literal, 'part')
+	mut c := CallCollector{ a: &a }
+	for base_name in ['join_path', 'os', 'sys'] {
+		base := a.add_val(.ident, base_name)
+		callee := if base_name == 'join_path' {
+			base
+		} else {
+			call_helper_node(mut a, flat.Node{ kind: .selector, value: 'join_path' }, [base])
+		}
+		call := call_helper_node(mut a, flat.Node{ kind: .call }, [callee, arg, arg])
+		imports := {
+			'sys': 'os'
+		}
+		mut calls := []string{}
+		c.collect_lowered_join_path_single(a.node(call), '', imports, map[string]bool{}, mut calls)
+		assert (calls.len > 0) == (base_name != 'join_path')
+		calls.clear()
+		c.collect_lowered_join_path_single(a.node(call), 'main.join_path', imports, map[string]bool{}, mut calls)
+		assert calls.len == 0
+		c.collect_lowered_join_path_single(a.node(call), 'os.join_path', imports, {
+			base_name: true
+		}, mut calls)
+		assert calls.len == 0
+	}
+}
+
+fn test_checked_local_names_copy_only_when_a_loop_adds_a_name() {
+	for existing in [0, 1, 2] {
+		mut a := flat.FlatAst.new()
+		mut tc := types.TypeChecker.new(&a)
+		tc.parallel_check_sparse = true
+		tc.fn_param_types['checked_names'] = []types.Type{}
+		binding := a.add_val(.ident, 'value')
+		tc.sparse_expr_type_values[int(binding)] = types.Type(types.int_)
+		container := a.add_val(.ident, 'items')
+		loop := call_helper_node(mut a, flat.Node{ kind: .for_in_stmt }, [binding, flat.empty_node,
+			container])
+		body := call_helper_node(mut a, flat.Node{ kind: .block }, [loop])
+		fn_id := call_helper_node(mut a, flat.Node{ kind: .fn_decl, value: 'checked_names' }, [body])
+		names := if existing > 0 {
+			{
+				'value': existing == 2
+				'other': true
+			}
+		} else {
+			{
+				'other': true
+			}
+		}
+		collector := CallCollector{ a: &a, tc: &tc }
+		checked := collector.checked_local_bindings(a.node(fn_id), 'main', map[string]string{}, names) or {
+			panic('checked loop bindings must be supported')
+		}
+		assert checked.ident_names['value'] && checked.ident_names['other']
+		assert names.len == if existing > 0 { 2 } else { 1 }
+		assert names['value'] == (existing == 2)
+	}
+}
+
+fn test_inference_name_copy_keeps_nested_and_sibling_loop_scopes_private() {
+	for original_value in [false, true] {
+		mut a := flat.FlatAst.new()
+		mut tc := types.TypeChecker.new(&a)
+		tc.parallel_check_sparse = true
+		outer_binding := a.add_val(.ident, 'value')
+		inner_binding := a.add_val(.ident, 'value')
+		sibling_binding := a.add_val(.ident, 'sibling')
+		for id, name in {
+			int(outer_binding):   'Outer'
+			int(inner_binding):   'Inner'
+			int(sibling_binding): 'Sibling'
+		} {
+			tc.sparse_expr_type_values[id] = types.Type(types.Struct{ name_id: flat.source_type_id(name) })
+		}
+		container := a.add_val(.ident, 'items')
+		inner_use := a.add_val(.ident, 'value')
+		inner_body := call_helper_node(mut a, flat.Node{ kind: .block }, [inner_use])
+		inner := call_helper_node(mut a, flat.Node{ kind: .for_in_stmt }, [
+			inner_binding,
+			flat.empty_node,
+			container,
+			inner_body,
+		])
+		outer_after_inner := a.add_val(.ident, 'value')
+		outer_body := call_helper_node(mut a, flat.Node{ kind: .block }, [inner, outer_after_inner])
+		outer := call_helper_node(mut a, flat.Node{ kind: .for_in_stmt }, [
+			outer_binding,
+			flat.empty_node,
+			container,
+			outer_body,
+		])
+		sibling_use := a.add_val(.ident, 'sibling')
+		sibling_body := call_helper_node(mut a, flat.Node{ kind: .block }, [sibling_use])
+		sibling := call_helper_node(mut a, flat.Node{ kind: .for_in_stmt }, [
+			sibling_binding,
+			flat.empty_node,
+			container,
+			sibling_body,
+		])
+		after := a.add_val(.ident, 'value')
+		after_sibling := a.add_val(.ident, 'sibling')
+		root := call_helper_node(mut a, flat.Node{ kind: .block }, [outer, sibling, after,
+			after_sibling])
+		names := {
+			'value': original_value
+			'other': true
+		}
+		mut local_types := flat.TypeTextBindings.from_names({
+			'value': 'Before'
+		})
+		mut ident_types := flat.NodeTypeTextBindings{}
+		collector := CallCollector{ a: &a, tc: &tc }
+		collector.infer_local_type_bindings(a.node(root), 'main', map[string]string{}, names, mut local_types, mut ident_types, false)
+		assert names == {
+			'value': original_value
+			'other': true
+		}
+		assert local_types.value('value') == 'Before'
+		assert !local_types.contains('sibling')
+		assert ident_types.value(int(inner_use)) == 'Inner'
+		assert ident_types.value(int(outer_after_inner)) == 'Outer'
+		assert ident_types.value(int(sibling_use)) == 'Sibling'
+		assert ident_types.value(int(after)) == 'Before'
+		assert ident_types.value(int(after_sibling)) == ''
+	}
 }

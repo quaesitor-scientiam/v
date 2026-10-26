@@ -116,8 +116,7 @@ fn array_length(value toml.Any) int {
 	return -1
 }
 ') or { panic(err) }
-	main_file := os.join_path(root, 'main.v')
-	os.write_file(main_file, r'module main
+	os.write_file(os.join_path(root, 'main.v'), r'module main
 
 import toml
 import typesonly
@@ -140,9 +139,9 @@ fn main() {
 	index := 1
 	minimum := [u32(0x80), 0x800, 0x10000][index]
 	assert minimum == u32(0x800)
-	address := usize(0x12345)
+	address := uint(0x12345)
 	unsafe {
-		assert usize(voidptr(address)) == address
+		assert uint(voidptr(address)) == address
 	}
 	assert "${u8(0):02x}" == "00"
 	assert "${u8(255):02x}" == "ff"
@@ -190,17 +189,39 @@ fn main() {
 	os.write_file(os.join_path(root, 'bad.native.v'), 'invalid native source') or { panic(err) }
 	os.write_file(os.join_path(root, 'bad_test.v'), 'invalid test source') or { panic(err) }
 	program := os.join_path(root, 'program')
-	for entry in [root, main_file] {
-		mut args := ['-b', 'fastc', '-enable-globals', '-nocache', '-o', program]
-		if entry == main_file {
-			args << ['-d', 'fastc_real_builtin']
-		}
-		args << entry
-		compiled := cmdexec.run(@VEXE, args)
+	compiled := cmdexec.run(@VEXE, ['-b', 'fastc', '-enable-globals', '-nocache', '-o', program,
+		root])
+	assert compiled.exit_code == 0, compiled.output
+	run := cmdexec.run(program, [])
+	assert run.exit_code == 0, run.output
+	assert run.output == '42\n2\n2\n-1\n42\n7\nmissing\n0x10, 0x02\n', run.output
+}
+
+// A program file named on its own is compiled alone, as by the C backend, so
+// independent programs can share a directory (as in `examples/`).
+fn test_fastc_real_builtin_file_entry_excludes_sibling_programs() {
+	root := os.join_path(os.vtmp_dir(), 'fastc_lone_entry_${os.getpid()}')
+	os.mkdir_all(root) or { panic(err) }
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	os.write_file(os.join_path(root, 'first.v'), "import os\n\nfn main() {\n\tprintln('first \${os.args.len}')\n}\n") or {
+		panic(err)
+	}
+	os.write_file(os.join_path(root, 'second.v'), "fn main() {\n\tprintln('second')\n}\n") or {
+		panic(err)
+	}
+	for name, expected in {
+		'first':  'first 1\n'
+		'second': 'second\n'
+	} {
+		program := os.join_path(root, name)
+		compiled := cmdexec.run(@VEXE, ['-b', 'fastc', '-d', 'fastc_real_builtin', '-nocache',
+			'-o', program, os.join_path(root, '${name}.v')])
 		assert compiled.exit_code == 0, compiled.output
 		run := cmdexec.run(program, [])
 		assert run.exit_code == 0, run.output
-		assert run.output == '42\n2\n2\n-1\n42\n7\nmissing\n0x10, 0x02\n', run.output
+		assert run.output == expected, run.output
 	}
 }
 

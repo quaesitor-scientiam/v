@@ -704,6 +704,16 @@ fn test_formatter_preserves_declaration_attribute_groups() {
 	assert vfmt('declaration_attribute_groups_twice', out) == out
 }
 
+fn test_formatter_keeps_module_qualified_attribute_names() {
+	// A module-qualified custom attribute name (`@[mod.Tag]`, vlang/rfcs#35)
+	// is one name, so the formatter must not split it back into `mod` and
+	// `Tag` at declaration, field, or enum-value level.
+	source := "module main\n\n@[mod.Skip]\nstruct Dotted {\n\tfield string @[mod.Other; mod.Tag: 'x']\n\tplain string @[mod.Third]\n}\n\nenum Level {\n\tone  @[mod.Fourth: 'y']\n\ttwo  @[mod.Fifth]\n}\n\nfn main() {}\n"
+	out := vfmt('module_qualified_attribute_names', source)
+	assert out == source, out
+	assert vfmt('module_qualified_attribute_names_twice', out) == out
+}
+
 fn test_formatter_keeps_comptime_branch_and_selective_import_comments_inside() {
 	source := "import sample {\n\tOne,\n\tTwo,\n\t// trailing import\n}\n\n\$if linux {\n\tprintln('first')\n\t// trailing first\n} \$else \$if windows {\n\t// comment-only second\n} \$else {\n\tprintln('last')\n\t// trailing last\n}\n"
 	out := vfmt('comptime_branch_selective_import_comments', source)
@@ -1424,8 +1434,8 @@ fn test_formatter_ignores_vfmt_directives_inside_strings() {
 }
 
 fn test_formatter_preserves_go_legacy_dollar_builtins_and_bodyless_functions() {
-	bodyless := vfmt('bodyless_functions', 'fn plain(value usize) usize\nfn C.c_call(value int) int\nfn JS.js_call(value int) int\n')
-	assert bodyless.contains('fn plain(value usize) usize'), bodyless
+	bodyless := vfmt('bodyless_functions', 'fn plain(value uint) uint\nfn C.c_call(value int) int\nfn JS.js_call(value int) int\n')
+	assert bodyless.contains('fn plain(value uint) uint'), bodyless
 	assert bodyless.contains('fn C.c_call(value int) int'), bodyless
 	assert bodyless.contains('fn JS.js_call(value int) int'), bodyless
 	assert !bodyless.contains('fn C.plain'), bodyless
@@ -1760,6 +1770,36 @@ fn test_source_preservation_matches_formatter_fixtures() {
 		actual := vfmt_file_with_json_migration(path)
 		assert actual == expected, name
 	}
+}
+
+// An embed with a default (`Inner = Inner{}`) is a field without a type. Its empty type column
+// must not add a second space before the `=`, and the fields after it keep their alignment.
+fn test_formatter_writes_embed_defaults_without_an_empty_type_column() {
+	fixture_dir := os.join_path(@VEXEROOT, 'vlib/v/fmt/tests')
+	keep := os.read_file(os.join_path(fixture_dir, 'struct_embed_with_default_keep.vv')) or {
+		panic(err)
+	}
+	assert vfmt('embed_default_keep', keep) == keep
+	input := os.read_file(os.join_path(fixture_dir, 'struct_embed_with_default_input.vv')) or {
+		panic(err)
+	}
+	expected := os.read_file(os.join_path(fixture_dir, 'struct_embed_with_default_expected.vv')) or {
+		panic(err)
+	}
+	formatted := vfmt('embed_default_input', input)
+	assert formatted == expected
+	assert vfmt('embed_default_twice', formatted) == formatted
+}
+
+// `typeof(expr)` in a type position is linked to its expression by the
+// compiler's parser; vfmt must write back the source spelling, not the link.
+fn test_formatter_round_trips_typeof_types() {
+	fixture := os.join_path(@VEXEROOT, 'vlib/v/fmt/tests/typeof_as_type_keep.vv')
+	source := os.read_file(fixture) or { panic(err) }
+	out := vfmt('typeof_as_type', source)
+	assert out == source
+	assert !out.contains('__expr_')
+	assert reparse_diagnostics('typeof_as_type_reparse', out) == 0
 }
 
 fn test_channel_ops() {

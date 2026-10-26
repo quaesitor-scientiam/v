@@ -3,6 +3,79 @@ module driver
 import os
 import v.pref
 
+fn test_cached_module_closure_dependencies_outlive_prepare_scope() {
+	mut state := V3ModuleCacheState{
+		module_sources: {
+			'closure': ['/vlib/builtin/closure/closure.v']
+		}
+		headers:        {
+			'closure': 'module closure\nfn closure_data()\n'
+		}
+	}
+	for i in 0 .. 64 {
+		name := 'module_${i}'
+		state.module_sources[name] = ['/vlib/${name}/module.v']
+		state.headers[name] = 'module ${name}\nfn value()\n'
+	}
+	scope := prealloc_scope_begin_for_v3()
+	mut bodies := map[string]string{}
+	for i in 0 .. 64 {
+		bodies['module_${i}'] = 'void value() { closure__closure_data(); }'
+	}
+	cache_record_closure_dependencies(bodies, '', scope, mut state)
+	$if prealloc {
+		for i in 0 .. 64 {
+			name := 'module_${i}'
+			header := state.headers[name]
+			dependencies := state.module_dependencies[name]
+			assert !unsafe { prealloc_scope_owns(scope, header.str) }, name
+			assert !unsafe { prealloc_scope_owns(scope, dependencies.data) }, name
+		}
+	}
+	prealloc_scope_leave_for_v3(scope)
+	prealloc_scope_free_for_v3(scope)
+	// The preparation arena has gone away, including temporary module names and
+	// the storage that growing dependency maps and arrays would allocate there.
+	for i in 0 .. 64 {
+		name := 'module_${i}'
+		assert state.headers[name].contains('import builtin.closure as ${closure_runtime_import_alias}')
+		assert state.module_dependencies[name] == ['closure']
+	}
+}
+
+fn test_cached_module_preserves_generated_closure_dependencies() {
+	mut state := V3ModuleCacheState{
+		module_sources: {
+			'os':      ['/vlib/os/os.v']
+			'closure': ['/vlib/builtin/closure/closure.v']
+			'other':   ['/vlib/other/other.v']
+		}
+		headers:        {
+			'os':      'module os\nfn execvp()\n'
+			'closure': 'module closure\nfn closure_try_destroy()\n'
+			'other':   'module other\nfn unrelated()\n'
+		}
+	}
+	cache_record_closure_dependencies({
+		'os':      'void os__execvp() { closure__closure_try_destroy(value); }'
+		'closure': 'void closure__closure_try_destroy() {}'
+		'other':   'void other__unrelated() { puts("closure__fake"); /* closure__unused */ }'
+	}, '', unsafe { nil }, mut state)
+	assert state.headers['os'].contains('import builtin.closure as ${closure_runtime_import_alias}')
+	assert cache_dependency_modules(&state, ['os']) == ['closure']
+	assert !state.headers['closure'].contains('import builtin.closure')
+	assert !state.headers['other'].contains('import builtin.closure')
+	first_header := state.headers['os']
+	cache_record_closure_dependencies({
+		'os': 'void os__execvp() { closure__closure_try_destroy(value); }'
+	}, '', unsafe { nil }, mut state)
+	assert state.headers['os'] == first_header
+	cache_record_closure_dependencies({
+		'other': 'void other__use() { kept_wrapper(); }'
+	}, '${v3_program_wrappers_begin}\nstatic void kept_wrapper(void) { closure__closure_data(); }\nstatic void unused_wrapper(void) { missing(); }\n${v3_program_wrappers_end}\n', unsafe { nil }, mut state)
+	assert cache_dependency_modules(&state, ['other']) == ['closure']
+}
+
 fn test_module_cache_compiler_identity_changes_when_executable_changes() {
 	root := os.join_path(os.vtmp_dir(), 'v3_cache_vexe_identity_${os.getpid()}')
 	os.rmdir_all(root) or {}
@@ -107,7 +180,7 @@ fn test_large_cold_cache_restarts_without_cache() {
 	assert should_restart_v3_large_cold_cache(true, true, limit, false, false, false)
 	assert !should_restart_v3_large_cold_cache(true, true, limit - 1, false, false, false)
 	assert !should_restart_v3_large_cold_cache(false, true, limit, false, false, false)
-	assert !should_restart_v3_large_cold_cache(true, false, limit, false, false, false)
+	assert should_restart_v3_large_cold_cache(true, false, limit, false, false, false)
 	assert !should_restart_v3_large_cold_cache(true, true, limit, true, false, false)
 	assert !should_restart_v3_large_cold_cache(true, true, limit, false, true, false)
 	assert !should_restart_v3_large_cold_cache(true, true, limit, false, false, true)
@@ -295,27 +368,29 @@ fn test_cached_object_signature_ignores_prunable_program_wrappers() {
 	// A build that parses a module from its header generates none of that module's
 	// wrappers, and has to find the object that the build from source published.
 	base := 'base signature'
+	plain := v3_cached_object_program_compile_signature(base, '')
 	from_source := '#define V3CACHE_PROGRAM_UNIT 1\n${test_wrapper_sections}/* V3CACHE_BODY_BEGIN */\n'
 	from_header := '#define V3CACHE_PROGRAM_UNIT 1\n/* V3CACHE_BODY_BEGIN */\n'
 	assert v3_opaque_program_wrappers(from_source) == ''
-	assert v3_cached_object_program_compile_signature(base, from_source) == base
-	assert v3_cached_object_program_compile_signature(base, from_header) == base
+	assert v3_cached_object_program_compile_signature(base, from_source) == plain
+	assert v3_cached_object_program_compile_signature(base, from_header) == plain
 }
 
 fn test_cached_object_signature_keeps_unprunable_program_wrappers_apart() {
 	// What a wrapper section holds besides functions and declarations stays in
 	// every module object of the build, so those objects serve that program only.
 	base := 'base signature'
+	plain := v3_cached_object_program_compile_signature(base, '')
 	stateful := '/* V3CACHE_PROGRAM_WRAPPERS */\nstatic int wrapper_calls = 0;\nstatic void counted(void) { wrapper_calls++; }\n/* V3CACHE_PROGRAM_WRAPPERS_END */\n'
 	assert v3_opaque_program_wrappers(stateful) == 'static int wrapper_calls = 0;\n'
 	first := v3_cached_object_program_compile_signature(base, stateful)
-	assert first != base
+	assert first != plain
 	other := v3_cached_object_program_compile_signature(base, stateful.replace('wrapper_calls = 0', 'wrapper_calls = 1'))
-	assert other != base && other != first
+	assert other != plain && other != first
 	exported := '/* V3CACHE_PROGRAM_WRAPPERS */\nint IShape__area(IShape* i) {\n\treturn 0;\n}\n/* V3CACHE_PROGRAM_WRAPPERS_END */\n'
-	assert v3_cached_object_program_compile_signature(base, exported) != base
+	assert v3_cached_object_program_compile_signature(base, exported) != plain
 	unfinished := '/* V3CACHE_PROGRAM_WRAPPERS */\nstatic void broken(void) {\n\tint x;\n'
-	assert v3_cached_object_program_compile_signature(base, unfinished) != base
+	assert v3_cached_object_program_compile_signature(base, unfinished) != plain
 }
 
 fn test_cached_object_signature_covers_the_arguments_of_the_object_compiler() {
@@ -341,8 +416,30 @@ fn test_cached_object_signature_keeps_panic_frame_objects_apart() {
 	base := 'base signature'
 	plain := 'int declaration;\n/* V3CACHE_BODY_BEGIN */\n'
 	with_frames := 'typedef struct v_unwind_frame {\n\tstruct v_unwind_frame* prev;\n} v_unwind_frame;\n/* V3CACHE_BODY_BEGIN */\n'
-	assert v3_cached_object_program_compile_signature(base, plain) == base
-	assert v3_cached_object_program_compile_signature(base, with_frames) != base
+	no_frames := v3_cached_object_program_compile_signature(base, '')
+	assert v3_cached_object_program_compile_signature(base, plain) == no_frames
+	assert v3_cached_object_program_compile_signature(base, with_frames) != no_frames
+	after_include := '#include <setjmp.h>\n${with_frames}'
+	assert v3_cached_object_program_compile_signature(base, after_include) != no_frames
+}
+
+fn test_cached_object_signature_ignores_panic_frame_text_in_string_literals() {
+	// A program that compiles the C generator holds its source text as literals.
+	// A build that reads that module from its header has no such literals, so the
+	// literals must not give the objects of the cold build a different signature.
+	base := 'base signature'
+	literal := 'static const char _str_7[] = "typedef struct v_unwind_frame {";\n\tputs("typedef struct v_unwind_frame {");\n/* V3CACHE_BODY_BEGIN */\n'
+	assert v3_cached_object_program_compile_signature(base, literal) == v3_cached_object_program_compile_signature(base,
+		'')
+}
+
+fn test_cached_object_signature_keeps_system_libc_header_layouts_apart() {
+	base := 'base signature'
+	headerless := v3_cached_object_program_compile_signature(base, 'int declaration;\n')
+	native := v3_cached_object_program_compile_signature(base, '// preamble\n#define V_MANUAL_STDLIB_HEADERS 1\nint declaration;\n')
+	assert headerless == '${base}\nsystem_libc_headers=false'
+	assert native == '${base}\nsystem_libc_headers=true'
+	assert v3_cached_object_program_compile_signature(base, 'const char *text = "#define V_MANUAL_STDLIB_HEADERS 1";\n') == headerless
 }
 
 fn test_cache_function_reference_counts_scans_source_once() {

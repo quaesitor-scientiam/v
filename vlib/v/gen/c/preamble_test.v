@@ -593,6 +593,35 @@ fn test_headerless_pthread_fallback_respects_darwin_type_guards() {
 	assert c_code.contains('pthread_equal(a.handle, b.handle) != 0'), c_code
 }
 
+fn test_headerless_darwin_pthread_storage_matches_the_sdk() ! {
+	$if !macos {
+		return
+	}
+	mut g := FlatGen.new()
+	g.headerless_darwin_pthread_storage()
+	mut source := '#include <pthread.h>\n'
+	pthread_types := ['pthread_attr_t', 'pthread_mutex_t', 'pthread_cond_t', 'pthread_rwlock_t',
+		'pthread_rwlockattr_t', 'pthread_condattr_t', 'pthread_once_t']
+	for typ in pthread_types {
+		source += '#define ${typ} v_test_${typ}\n'
+	}
+	source += g.sb.str()
+	for typ in pthread_types {
+		source += '#undef ${typ}\n'
+		source += '_Static_assert(sizeof(v_test_${typ}) == sizeof(${typ}), "${typ} size");\n'
+		source += '_Static_assert(_Alignof(v_test_${typ}) == _Alignof(${typ}), "${typ} alignment");\n'
+	}
+	root := os.join_path(os.vtmp_dir(), 'darwin_pthread_storage_${os.getpid()}')
+	os.mkdir_all(root)!
+	defer { os.rmdir_all(root) or {} }
+	path := os.join_path(root, 'storage.c')
+	os.write_file(path, source)!
+	for arch in ['arm64', 'x86_64'] {
+		result := os.exec(['cc', '-arch', arch, '-std=c11', '-fsyntax-only', path])
+		assert result.exit_code == 0, '${arch}: ${result.output}'
+	}
+}
+
 fn test_headerless_libc_preamble_leaves_library_prototypes_to_v_bindings() {
 	mut g := FlatGen.new()
 	g.headerless_libc_preamble()
@@ -812,6 +841,8 @@ fn test_builtin_abi_decls_reuse_tcc_x64_stdatomic_fence_declaration() {
 	assert c_code.contains('#if defined(_WIN32) && (defined(__TINYC__) || (defined(_MSC_VER) && !defined(__clang__)))\n/* V atomic.h supplies atomic_thread_fence on Windows TCC and MSVC. */')
 	assert c_code.contains('#define atomic_thread_fence(order) __atomic_thread_fence(order)')
 	assert !c_code.contains('extern void __atomic_thread_fence(int order);')
+	// a <stdatomic.h> included first already defines the macro; defining it again is a warning
+	assert c_code.contains('#elif !defined(atomic_thread_fence)\n#define atomic_thread_fence(order) __atomic_thread_fence(order)')
 }
 
 fn test_map_equality_fallback_does_not_infer_value_type_from_size() {
@@ -957,4 +988,29 @@ fn test_manual_header_preflight_matches_portable_no_builtin_and_object_generatio
 			}
 		}
 	}
+}
+
+fn test_arm32_output_undefines_tinycc_identifier_macros() {
+	mut g := FlatGen.new()
+	g.set_target(pref.target_from('linux', 'amd64')!)
+	g.undef_target_identifier_macros()
+	assert g.sb.len == 0, '64-bit output is unchanged'
+	g.set_target(pref.target_from('linux', 'arm32')!)
+	g.undef_target_identifier_macros()
+	assert g.sb.str() == '#undef arm\n#undef arm_elf\n'
+	$if !macos && !linux {
+		return
+	}
+	clang := os.find_abs_path_of_executable('clang') or { return }
+	root := os.join_path(os.vtmp_dir(), 'arm32_identifier_macros_${os.getpid()}')
+	os.mkdir_all(root)!
+	defer { os.rmdir_all(root) or {} }
+	source := os.join_path(root, 'main.v')
+	c_file := os.join_path(root, 'main.c')
+	os.write_file(source, 'fn main() {\n\tarm := 3\n\tarm_elf := 4\n\tprintln(arm + arm_elf)\n}\n')!
+	generated := os.execute('${os.quoted_path(@VEXE)} -nocache -gc none -os linux -arch arm32 -cross -d v3_headerless_bootstrap -o ${os.quoted_path(c_file)} ${os.quoted_path(source)}')
+	assert generated.exit_code == 0, generated.output
+	// TinyCC predefines both macros on 32-bit ARM.
+	checked := os.execute('${os.quoted_path(clang)} -target armv7-unknown-linux-gnueabihf -std=c99 -fsyntax-only -Wno-everything -Darm=1 -Darm_elf=1 ${os.quoted_path(c_file)}')
+	assert checked.exit_code == 0, checked.output
 }

@@ -43,6 +43,7 @@ const external_commands = [
 	'download',
 	'env',
 	'fmt',
+	'generate',
 	'git-fmt-hook',
 	'gret',
 	'init',
@@ -129,6 +130,9 @@ fn main() {
 		run_external_tool(args, -1, 'repl')
 		return
 	}
+	if reuse_shared_test_compiler(args) {
+		return
+	}
 	compiler_args := compiler_args_before_program(args)
 	command_index, command := find_command(args)
 	// Tool arguments belong to the tool, including a completion query for the removed flag.
@@ -142,7 +146,7 @@ fn main() {
 		eprintln('unknown option `-usecache`; caching is enabled by default, use `-nocache` to disable it')
 		exit(1)
 	}
-	if selected_backend(compiler_args_before_program(option_args), false) == 'native' {
+	if native_backend_rejected(command, option_args) {
 		eprintln(pref.native_backend_replacement_message)
 		exit(1)
 	}
@@ -203,9 +207,13 @@ fn main() {
 		eprintln('The eval backend has been removed.')
 		exit(1)
 	}
+	if command == 'wipe-cache' {
+		run_wipe_cache(args, command_index)
+		return
+	}
 	if command in external_commands
-		|| command in ['new', 'init', 'install', 'link', 'list', 'outdated', 'remove', 'registry',
-			'search', 'show', 'unlink', 'update', 'upgrade', 'vlib-docs'] {
+		|| command in ['new', 'init', 'generate', 'install', 'link', 'list', 'outdated', 'remove',
+			'registry', 'search', 'show', 'unlink', 'update', 'upgrade', 'vlib-docs'] {
 		run_external_tool(args, command_index, command)
 		return
 	}
@@ -299,13 +307,35 @@ fn ownership_compiler_is_required(args []string) bool {
 	return false
 }
 
+fn compiler_bootstrap_requested(args []string, vroot string) bool {
+	entries := ['cmd/v', 'vlib/v'].map(os.real_path(os.join_path(vroot, it)))
+	mut option_value_follows := false
+	for arg in args {
+		if option_value_follows {
+			option_value_follows = false
+			continue
+		}
+		if arg == '-cf' || pref.option_may_consume_value(arg) {
+			option_value_follows = true
+			continue
+		}
+		if arg.starts_with('-') || arg in ['run', 'crun'] {
+			continue
+		}
+		if !os.exists(arg) {
+			return false
+		}
+		input := os.real_path(arg)
+		if os.is_dir(input) {
+			return input in entries
+		}
+		return os.file_name(input) == 'v.v' && os.dir(input) in entries
+	}
+	return false
+}
+
 fn ownership_compiler_bootstrap_input(args []string, vroot string) bool {
-	compiler_sources := [
-		os.real_path(os.join_path(vroot, 'cmd', 'v')),
-		os.real_path(os.join_path(vroot, 'cmd', 'v', 'v.v')),
-		os.real_path(os.join_path(vroot, 'vlib', 'v', 'v.v')),
-	]
-	return args.any(os.exists(it) && os.real_path(it) in compiler_sources)
+	return compiler_bootstrap_requested(args, vroot)
 }
 
 // ownership_bootstrap_can_use_current_compiler distinguishes compiling in support from
@@ -453,8 +483,8 @@ fn find_command(args []string) (int, string) {
 		}
 		if arg in external_commands
 			|| arg in ['version', '-version', '--version', 'help', '-h', '--help', 'get', 'interpret',
-				'new', 'init', 'install', 'link', 'list', 'outdated', 'remove', 'registry', 'search',
-				'show', 'unlink', 'update', 'upgrade', 'vlib-docs', 'build-module'] {
+				'new', 'init', 'generate', 'install', 'link', 'list', 'outdated', 'remove', 'registry',
+				'search', 'show', 'unlink', 'update', 'upgrade', 'vlib-docs', 'build-module'] {
 			return i, arg
 		}
 		if !arg.starts_with('-') {
@@ -537,6 +567,13 @@ fn external_tool_runtime_args(command string, prefix_args []string, command_args
 	// `v test` needs them for each test compilation and its failure reproduction command.
 	// Keep those options visible after the launcher has built the cached executable.
 	if command in ['build-examples', 'build-tools', 'self', 'test', 'test-self'] {
+		tool_args << prefix_args
+	}
+	if command == 'watch' {
+		// `v watch` reconstructs the compiler command from its own argv (see
+		// `all_args_before_watch_cmd` in cmd/tools/vwatch.v), so prefix compiler options like
+		// `-d veb_livereload` have to reach the tool again instead of only affecting
+		// the compilation of the watcher binary.
 		tool_args << prefix_args
 	}
 	if command == 'fmt' {
@@ -866,7 +903,7 @@ fn launch_v1(args []string, reason string, report_state RetryState) {
 	if diagnostics != '' {
 		eprint(diagnostics)
 	}
-	fallback := ensure_v1_fallback(reason, vls_mode) or {
+	fallback := ensure_v1_fallback(reason, transparent_fixture_fallback) or {
 		report_v3_fallback_unavailable(args, reason, report_state, err.msg(), diagnostics != '')
 		exit(1)
 	}
@@ -886,6 +923,8 @@ fn launch_v1(args []string, reason string, report_state RetryState) {
 	}
 	os.unsetenv(v3_fallback_file_env)
 	os.unsetenv(v3_c_error_dir_env)
+	// A source retry's private marker must not reach the compatibility compiler.
+	os.unsetenv('V3_INTERNAL_CACHE_FORCE_SOURCE')
 	mut launch_args := v1_fallback_args(args)
 	_, launched_command := find_command(args)
 	if launched_command == 'build-module' {
@@ -1327,8 +1366,8 @@ fn ensure_v1_fallback(reason string, quiet_install bool) !string {
 		process.set_environment(v1_fallback_make_environment(os.real_path(os.executable()), cache_parent, cached_launcher))
 		process.set_work_folder(vroot)
 		if quiet_install {
-			// Mini-VLS responses use the diagnostic stream. Keep installer progress
-			// out of that protocol, but retain it if installation fails.
+			// Mini-VLS responses and exact-output fixtures use the diagnostic stream.
+			// Keep installer progress out of it, but retain it if installation fails.
 			process.set_redirect_stdio_merged()
 			process.run()
 			install_output = process.stdout_slurp()
@@ -1528,4 +1567,15 @@ fn v1_fallback_make_hint() string {
 		return 'On Windows, install GNU make in MSYS2 (`make` or `mingw32-make`) and put its tools, including `sh`, on PATH.'
 	}
 	return 'Install make.'
+}
+
+// native_backend_rejected reports whether the removed `-b native` backend has to
+// be refused for `command`. `vfmt` is the one tool that still accepts the alias,
+// because it maps `native` onto the C formatter, so the launcher must let it
+// through instead of rejecting the flag before the tool ever sees it.
+fn native_backend_rejected(command string, option_args []string) bool {
+	if command == 'fmt' {
+		return false
+	}
+	return selected_backend(compiler_args_before_program(option_args), false) == 'native'
 }

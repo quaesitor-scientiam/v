@@ -19,11 +19,11 @@ fn (mut _ Transformer) prepare_parallel_monomorph_scan(_ int, _ int) bool {
 	return false
 }
 
-fn (mut _ Transformer) run_serial_scoped_monomorphize_specs(_ []PendingGenericFnSpec, mut _ map[string]bool, mut _ []string) bool {
+fn (mut _ Transformer) run_serial_scoped_monomorphize_specs(_ []PendingGenericFnSpec, mut _ GenericFnSpecBoolMap, mut _ []string) bool {
 	return false
 }
 
-fn (mut _ Transformer) run_parallel_monomorphize_specs(_ []PendingGenericFnSpec, _ map[string]GenericStructDecl, _ map[string]GenericSumDecl, mut _ map[string]bool, mut _ []string) bool {
+fn (mut _ Transformer) run_parallel_monomorphize_specs(_ []PendingGenericFnSpec, _ map[string]GenericStructDecl, _ map[string]GenericSumDecl, mut _ GenericFnSpecBoolMap, mut _ []string) bool {
 	return false
 }
 
@@ -69,6 +69,12 @@ pub fn scan_scoped_text_flags_parallel_multi(_ &flat.FlatAst, _ []voidptr, mut _
 
 fn free_worker_scopes_parallel(_ &flat.FlatAst, _ []voidptr) bool {
 	return false
+}
+
+// prescan_fixed_array_borrow_bodies leaves every borrow-summary body analysis to
+// the serial fixed point when v3 is built with the internal `v3_no_parallel` define.
+fn (mut _ Transformer) prescan_fixed_array_borrow_bodies(_ []BorrowCandidate) BorrowPrescan {
+	return BorrowPrescan{}
 }
 
 // prepare_with_pre_scans keeps preparation serial when v3 is built with the

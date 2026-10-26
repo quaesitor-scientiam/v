@@ -4,6 +4,40 @@ import v.flat
 import v.token
 import v.types
 
+fn test_optional_platform_integer_conversion_uses_target_width() {
+	original_bits := types.platform_int_bits()
+	original_portable := types.platform_int_c_spelling() == types.portable_int_c_type
+	defer {
+		types.set_platform_int_bits(original_bits)
+		if original_portable {
+			types.set_portable_platform_int()
+		}
+	}
+	for bits in [32, 64] {
+		types.set_platform_int_bits(bits)
+		assert optional_integer_conversion_needed('?int', '?i32') == (bits != 32)
+		assert optional_integer_conversion_needed('?i32', '?int') == (bits != 32)
+		assert optional_integer_conversion_needed('?int', '?i64') == (bits != 64)
+		assert optional_integer_conversion_needed('?i64', '?int') == (bits != 64)
+		assert optional_integer_conversion_needed('?int', '?u32')
+		assert optional_integer_conversion_needed('!int', '!u64')
+		types.set_portable_platform_int()
+		assert optional_integer_conversion_needed('?int', '?i32')
+		assert optional_integer_conversion_needed('!int', '!i64')
+	}
+}
+
+fn optional_integer_conversion_needed(source string, target string) bool {
+	mut a := flat.FlatAst.new()
+	value := a.add_node(flat.Node{ kind: .ident, value: 'value', typ: flat.source_type_id(source) })
+	mut tc := types.TypeChecker.new(&a)
+	mut t := new_transformer(mut a, &tc, map[string]bool{})
+	if _, _ := t.option_payload_conversion_types(value, flat.source_type_id(source), flat.source_type_id(target)) {
+		return true
+	}
+	return false
+}
+
 fn test_scoped_transform_batches_use_source_cost_for_ordinary_programs() {
 	$if !v3_no_parallel ? {
 		assert scoped_transform_batch_count(0, 0, 16, false) == 0
@@ -33,8 +67,8 @@ fn test_monomorph_job_count_does_not_start_empty_workers() {
 
 fn test_monomorph_job_limit_caps_large_programs() {
 	$if !v3_no_parallel ? {
-		assert monomorph_job_limit(12, 499_999, 0) == 4
-		assert monomorph_job_limit(12, 500_000, 0) == 4
+		assert monomorph_job_limit(12, 499_999, 0) == 8
+		assert monomorph_job_limit(12, 500_000, 0) == 8
 		assert monomorph_job_limit(1, 500_000, 0) == 1
 		assert monomorph_job_limit(12, 500_000, 6) == 6
 		assert monomorph_job_limit(4, 500_000, 8) == 4
@@ -53,8 +87,8 @@ fn test_generated_calls_publish_exact_resolution_except_cgen_intrinsics() {
 
 fn test_forwarded_optional_conversion_propagates_borrowed_clone() {
 	payload := types.Type(types.string_)
-	option := types.Type(types.OptionType{ base_type: payload })
-	result := types.Type(types.ResultType{ base_type: payload })
+	option := types.Type(types.OptionType{ base_type: &types.Type(payload) })
+	result := types.Type(types.ResultType{ base_type: &types.Type(payload) })
 	option_clones := ['string__clone']
 	result_clones := ['__v3_clone_owned_ierror', 'string__clone']
 	assert forwarded_wrapper_clone_calls(option, true) == option_clones
@@ -1261,7 +1295,9 @@ fn test_forwarded_container_fixed_array_return_expansion_is_reserved() {
 	})
 	mut map_tc := types.TypeChecker.new(&map_ast)
 	mut map_transformer := new_transformer(mut map_ast, &map_tc, map[string]bool{})
-	assert map_transformer.fn_span_map_expansion_estimate(int(map_value), int(map_fn)) > deferred_map_expansion_threshold
+	// Since #30938 a returned map is copied as it is, never converted entry by entry, so it
+	// reserves no expansion; the checker rejects maps whose entries are stored differently.
+	assert map_transformer.fn_span_map_expansion_estimate(int(map_value), int(map_fn)) == 0
 
 	mut lookup_ast := flat.FlatAst.new()
 	lookup_value := lookup_ast.add_node(flat.Node{
@@ -1288,7 +1324,7 @@ fn test_forwarded_container_fixed_array_return_expansion_is_reserved() {
 	})
 	mut lookup_tc := types.TypeChecker.new(&lookup_ast)
 	mut lookup_transformer := new_transformer(mut lookup_ast, &lookup_tc, map[string]bool{})
-	assert lookup_transformer.fn_span_map_expansion_estimate(int(lookup_value), int(lookup_fn)) > deferred_map_expansion_threshold
+	assert lookup_transformer.fn_span_map_expansion_estimate(int(lookup_value), int(lookup_fn)) == 0
 }
 
 fn test_disabled_call_zero_value_expansion_is_reserved() {
@@ -5150,7 +5186,7 @@ fn test_parallel_master_detaches_metadata_maps_before_writing() {
 	assert 'main.master_generated' in master.tc.fn_param_types
 	assert 'main.master_generated' !in worker.tc.fn_param_types
 
-	master.add_fn_literal_capture_context('CaptureContext', 'main', []string{}, map[string]string{})
+	master.add_fn_literal_capture_context('CaptureContext', 'main', []string{}, map[string]u32{})
 	assert 'CaptureContext' in master.structs
 	assert 'CaptureContext' !in worker.structs
 	assert 'CaptureContext' in master.tc.structs

@@ -478,6 +478,103 @@ fn main() {
 	assert run_module_cache_binary(second_output) == 'ok'
 }
 
+// check_warm_cached_interface_dispatch builds a program whose only dispatch
+// through `Sink` happens inside the cached `sinks` module, after an earlier
+// program warmed that module's object without ever reaching the dispatch.
+fn check_warm_cached_interface_dispatch(name string, sink_type string, sink_decl string) {
+	v3_bin := module_cache_compiler()
+	root := os.join_path(os.temp_dir(), 'v3_cached_iface_dispatch_${name}_${os.getpid()}')
+	os.rmdir_all(root) or {}
+	os.mkdir_all(root) or { panic(err) }
+	old_vmodules := os.getenv_opt('VMODULES')
+	os.setenv('VMODULES', os.join_path(root, 'vmods'), true)
+	defer {
+		if value := old_vmodules {
+			os.setenv('VMODULES', value, true)
+		} else {
+			os.unsetenv('VMODULES')
+		}
+		os.rmdir_all(root) or {}
+	}
+	write_module_cache_file(root, 'vmods/sinks/sinks.v', 'module sinks
+
+${sink_decl}
+
+pub struct Holder {
+pub mut:
+	s ${sink_type}
+}
+
+struct Worker {
+mut:
+	s ${sink_type}
+}
+
+fn (mut w Worker) go_put() string {
+	return w.s.put(41)
+}
+
+pub fn (mut h Holder) drive() string {
+	mut w := Worker{
+		s: h.s
+	}
+	return w.go_put()
+}
+')
+	program := 'module main
+
+import sinks
+
+struct MySink {}
+
+fn (mut m MySink) put(x int) string {
+	return "got \${x + 1}"
+}
+
+fn new_holder() &sinks.Holder {
+	return &sinks.Holder{
+		s: MySink{}
+	}
+}
+'
+	write_module_cache_file(root, 'p1/main.v', program + '
+fn main() {
+	h := new_holder()
+	println(voidptr(h) != unsafe { nil })
+}
+')
+	write_module_cache_file(root, 'p2/main.v', program + '
+fn main() {
+	mut h := new_holder()
+	println(h.drive())
+}
+')
+	cache_dir := os.join_path(root, 'cache')
+	first_output := os.join_path(root, 'first')
+	compile_module_cache_project(v3_bin, cache_dir, os.join_path(root, 'p1', 'main.v'),
+		first_output)
+	assert run_module_cache_binary(first_output) == 'true'
+	// `sinks` is now header-only, so `MySink.put` has no caller in the warm AST.
+	second_output := os.join_path(root, 'second')
+	compile_module_cache_project(v3_bin, cache_dir, os.join_path(root, 'p2', 'main.v'),
+		second_output)
+	assert run_module_cache_binary(second_output) == 'got 42'
+}
+
+fn test_warm_cached_interface_dispatch_keeps_program_implementers() {
+	check_warm_cached_interface_dispatch('plain', 'Sink', 'pub interface Sink {
+mut:
+	put(x int) string
+}')
+}
+
+fn test_warm_cached_generic_interface_dispatch_keeps_program_implementers() {
+	check_warm_cached_interface_dispatch('generic', 'Sink[int]', 'pub interface Sink[T] {
+mut:
+	put(x T) string
+}')
+}
+
 fn module_cache_object_hash(path string) u64 {
 	bytes := os.read_bytes(path) or { panic(err) }
 	mut hash := u64(1469598103934665603)
@@ -2652,9 +2749,10 @@ fn main() {
 	assert result.exit_code != 0
 	stdout := os.read_file(stdout_file) or { panic(err) }
 	stderr := os.read_file(stderr_file) or { panic(err) }
-	assert stderr.contains('failed to build cached program main:'), 'stdout:\n${stdout}\nstderr:\n${stderr}'
+	// The C binding has a prototype, so the build fails when it links.
+	assert stderr.contains('C compilation failed:'), 'stdout:\n${stdout}\nstderr:\n${stderr}'
 	assert stderr.contains('v3_missing_restart_stdio_symbol'), stderr
-	assert !stdout.contains('failed to build cached program main:'), 'stdout:\n${stdout}\nstderr:\n${stderr}'
+	assert !stdout.contains('C compilation failed:'), 'stdout:\n${stdout}\nstderr:\n${stderr}'
 }
 
 fn test_module_cache_restart_preserves_macos_fallback_transport() {
@@ -6152,6 +6250,43 @@ fn main() {
 	assert strict.output.contains('check (incremental)'), strict.output
 	assert strict.output.contains('cgen (incremental)'), strict.output
 	assert run_module_cache_binary(strict_output) == '43'
+}
+
+// test_incremental_program_cache_rebuilds_rejected_restored_body builds a program that
+// imports mcp (its C pulls in mbedtls), then edits one string literal. The incremental
+// restore of the first build must not make the second build fail on a redefinition of
+// a C type from the prefix, nor leave a stale executable behind.
+fn test_incremental_program_cache_rebuilds_rejected_restored_body() {
+	$if !macos {
+		return
+	}
+	v3_bin := module_cache_compiler()
+	root := os.join_path(os.temp_dir(), 'v3_incremental_rejected_body_${os.getpid()}')
+	os.rmdir_all(root) or {}
+	os.mkdir_all(root) or { panic(err) }
+	defer {
+		os.rmdir_all(root) or {}
+	}
+	cache_dir := os.join_path(root, 'cache')
+	main_file := os.join_path(root, 'main.v')
+	for word in ['first', 'second', 'third'] {
+		write_module_cache_file(root, 'main.v', "module main
+
+import mcp
+
+fn label() string {
+	return '${word}'
+}
+
+fn main() {
+	_ := mcp.Server{}
+	println(label())
+}
+")
+		output := os.join_path(root, word)
+		compile_module_cache_project(v3_bin, cache_dir, main_file, output)
+		assert run_module_cache_binary(output) == word
+	}
 }
 
 fn test_incremental_program_cache_reuses_cached_module_objects() {

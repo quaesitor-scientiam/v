@@ -30,6 +30,13 @@ fn test_mmap_header_ownership_is_limited_to_supported_shipped_bindings() {
 	a.cached_header_sources['/cache/os.vh'] = source
 	g.a = &a
 	assert g.core_native_header_is_redeclared('/cache/os.vh', '<sys/mman.h>')
+	a.cached_header_sources['/cache/os.vh'] = '/vroot/vlib/os/args.v'
+	assert g.core_native_header_is_redeclared('/cache/os.vh', '<sys/mman.h>')
+	a.cached_header_sources['/cache/user.vh'] = '/project/os/args.v'
+	assert !g.core_native_header_is_redeclared('/cache/user.vh', '<sys/mman.h>')
+	g.set_target(pref.target_from('linux', 'arm32')!)
+	assert !g.core_native_header_is_redeclared('/cache/os.vh', '<sys/mman.h>')
+	g.set_target(pref.target_from('macos', 'arm64')!)
 	g.no_builtin = true
 	assert !g.core_native_header_is_redeclared(source, '<sys/mman.h>')
 	g.no_builtin = false
@@ -166,5 +173,51 @@ fn test_32_bit_bsd_mmap_uses_the_native_sdk_offset_type() {
 		code := os.read_file(c_file)!
 		assert code.contains('#include <sys/mman.h>'), '${target}: the SDK must own the 64-bit off_t argument'
 		assert !code.contains('void* mmap('), '${target}: do not emit the pointer-width V fallback beside the SDK'
+	}
+}
+
+fn test_headerless_32_bit_bootstrap_takes_mmap_from_the_sdk() {
+	$if !macos && !linux {
+		return
+	}
+	clang := os.find_abs_path_of_executable('clang') or { return }
+	root := os.join_path(os.vtmp_dir(), 'mmap_headerless32_${os.getpid()}')
+	os.mkdir_all(os.join_path(root, 'sdk', 'sys'))!
+	defer { os.rmdir_all(root) or {} }
+	source := os.join_path(root, 'main.v')
+	c_file := os.join_path(root, 'main.c')
+	os.write_file(source, 'import os\nfn main() {\n mut mapping := os.mmap_create(os.args[1], 4096) or { panic(err) }\n mapping.close()\n}\n')!
+	for arch in ['amd64', 'arm32'] {
+		generated := cmdexec.run(@VEXE, ['-nocache', '-gc', 'none', '-os', 'linux', '-arch', arch,
+			'-cross', '-d', 'v3_headerless_bootstrap', '-o', c_file, source])
+		assert generated.exit_code == 0, generated.output
+		code := os.read_file(c_file)!
+		if arch == 'amd64' {
+			assert !code.contains('#include <sys/mman.h>'), 'a 64-bit snapshot keeps its own mmap ABI'
+			assert code.contains('void* mmap(')
+		} else {
+			assert code.contains('#include <sys/mman.h>')
+			assert !code.contains('void* mmap('), 'the SDK owns the 32-bit off_t argument'
+		}
+	}
+	// glibc spells the 32-bit offset `long`, musl always uses 64 bits. Either SDK
+	// prototype must be the only declaration of mmap.
+	for libc, off_t in {
+		'glibc': 'long'
+		'musl':  'long long'
+	} {
+		guard := if libc == 'glibc' { '__off_t_defined' } else { '__DEFINED_off_t' }
+		os.write_file(os.join_path(root, 'sdk', 'sys', 'mman.h'), '#define ${guard}
+typedef ${off_t} off_t;
+void *mmap(void *addr, __SIZE_TYPE__ len, int prot, int flags, int fd, off_t offset);
+int munmap(void *addr, __SIZE_TYPE__ len);
+int msync(void *addr, __SIZE_TYPE__ len, int flags);
+')!
+		for target in ['armv7-unknown-linux-gnueabihf', 'i686-unknown-linux-gnu'] {
+			checked := cmdexec.run(clang, ['-target', target, '-std=c99', '-fsyntax-only',
+				'-Wno-everything', '-Werror=implicit-function-declaration',
+				'-I${os.join_path(root, 'sdk')}', c_file])
+			assert checked.exit_code == 0, '${libc}/${target}: ${checked.output}'
+		}
 	}
 }

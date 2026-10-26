@@ -192,13 +192,13 @@ fn test_zero_value_normalizes_generic_alias_but_preserves_generic_struct() {
 	alias_zero_id := t.zero_value_for_type(flat.source_type_id('Values[int]'))
 	alias_zero := t.a.nodes[int(alias_zero_id)]
 	assert alias_zero.kind == .array_init
-	assert alias_zero.value == 'int'
+	assert alias_zero.source_value_id() == flat.source_type_int
 	assert alias_zero.typ_text() == '[]int'
 
 	struct_zero_id := t.zero_value_for_type(flat.source_type_id('Box[int]'))
 	struct_zero := t.a.nodes[int(struct_zero_id)]
 	assert struct_zero.kind == .struct_init
-	assert struct_zero.value == 'Box[int]'
+	assert struct_zero.source_value_id() == flat.source_type_id('Box[int]')
 	assert struct_zero.typ_text() == 'Box[int]'
 }
 
@@ -215,7 +215,10 @@ fn test_explicit_generic_fn_value_candidates_resolve_selective_import() {
 	file_name := '/tmp/main.v'
 	tc.file_selective_imports[file_import_key(file_name, 'id')] = ['lib.id']
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
-	t.node_file_map_cache = []u32{len: a.nodes.len}
+	// The node context caches are sized together; a node without a file id
+	// takes its context from its module entry.
+	t.node_module_map_cache = []u16{len: a.nodes.len}
+	t.node_file_map_cache = []u16{len: a.nodes.len}
 	t.node_file_map_cache[int(index_id)] = t.node_context_text_id(file_name)
 
 	candidates := t.explicit_generic_fn_value_decl_candidates(index_id, base_id, a.nodes[int(base_id)], 'main')
@@ -375,9 +378,7 @@ fn test_flattened_generic_struct_arg_canonicalizes_to_source_application() {
 	assert flat.TypeTextList{ ids: t.recorded_type_specialization_args(flat.source_type_id('StructType_int')) or { []u32{} } }.names() == [
 		'int',
 	]
-	assert generic_specialized_type_matches_flat_name('StructType_int', 'StructType', [
-		'int',
-	])
+	assert generic_specialized_type_matches_flat_name(flat.source_type_id('StructType_int'), 'StructType', [flat.source_type_int])
 	assert flat.source_type_name(t.generic_specialized_source_type_name(flat.source_type_id('StructType_int')) or { u32(0) }) == 'StructType[int]'
 	assert flat.source_type_name(t.canonical_generic_specialization_arg(flat.source_type_id('StructType_int'))) == 'StructType[int]'
 	assert flat.source_type_name(t.generic_specialized_source_type_name(flat.source_type_id('&StructType_int')) or { u32(0) }) == '&StructType[int]'
@@ -442,7 +443,7 @@ fn test_concrete_generic_fn_alias_call_expands_multi_return_signature() {
 	tc.type_alias_generic_params['FnMultiReturn'] = ['I', 'O', 'R']
 	tc.fn_ret_types['make_splitter'] = types.Type(types.Alias{
 		name_id:   flat.source_type_id('FnMultiReturn[string, string, string]')
-		base_type: types.Type(types.void_)
+		base_type: &types.Type(types.void_)
 	})
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
 	t.cur_module = 'main'
@@ -473,7 +474,7 @@ fn test_concrete_generic_fn_alias_call_expands_result_signature() {
 	tc.type_alias_generic_params['ParseFunction'] = ['T']
 	tc.fn_ret_types['literal'] = types.Type(types.Alias{
 		name_id:   flat.source_type_id('ParseFunction[string]')
-		base_type: types.Type(types.void_)
+		base_type: &types.Type(types.void_)
 	})
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
 	t.cur_module = 'main'
@@ -990,9 +991,10 @@ fn test_record_monomorph_cache_spec_replaces_existing_entry() {
 	mut tc := types.TypeChecker.new(&a)
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
 
-	t.record_monomorph_cache_spec('main.f_T_int', 'main.f', 'main', flat.TypeTextList.from_names(['int']).ids)
-	t.record_monomorph_cache_spec('main.f_T_int', 'main.f', 'main', flat.TypeTextList.from_names(['iam.Token']).ids)
-	spec := t.monomorph_cache_specs['main.f_T_int'] or {
+	key := generic_fn_spec_key('main.f', [flat.source_type_int])
+	t.record_monomorph_cache_spec(key, 'main.f', 'main', [flat.source_type_int])
+	t.record_monomorph_cache_spec(key, 'main.f', 'main', flat.TypeTextList.from_names(['iam.Token']).ids)
+	spec := t.monomorph_cache_specs.get(key) or {
 		assert false, 'the re-recorded spec disappeared'
 		return
 	}
@@ -1035,7 +1037,7 @@ fn main() {
 		t.prepare()
 		decl := t.cached_generic_fn_decls()['count'] or { panic('missing count declaration') }
 		args := ['Item']
-		mut emitted := map[string]bool{}
+		mut emitted := GenericFnSpecBoolMap{}
 		mut generated := []string{}
 		assert t.run_scoped_monomorphize_specs([PendingGenericFnSpec{
 			decl: decl
@@ -1278,6 +1280,8 @@ fn test_recorded_generic_arg_ids_preserve_ownership_and_invalidate_misses() {
 	mut a := flat.FlatAst.new()
 	mut tc := types.TypeChecker.new(&a)
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
+	// prepare allocates the miss cache; without it misses are not recorded.
+	t.spec_args_misses = &SpecArgsMissCache{}
 	key := flat.source_type_id('Record_int')
 	assert t.recorded_type_specialization_args(key) == none
 	assert t.spec_args_misses.misses[key]
@@ -1287,7 +1291,7 @@ fn test_recorded_generic_arg_ids_preserve_ownership_and_invalidate_misses() {
 	args[0] = flat.source_type_string
 	assert t.recorded_type_specialization_args(key) or { []u32{} } == [flat.source_type_int]
 
-	mut first_parent := flat.TypeTextListBindings{}
+	mut first_parent := SpecializationArgsBindings{}
 	first_parent.set_ids('First_int', [flat.source_type_int])
 	t.generic_specialization_args_parent = &first_parent
 	parent_key := flat.source_type_id('Second_string')
@@ -1295,9 +1299,9 @@ fn test_recorded_generic_arg_ids_preserve_ownership_and_invalidate_misses() {
 	assert t.recorded_generic_specialization_args('Second_string') == none
 	assert t.spec_args_misses.name_misses['Second_string']
 	assert t.spec_args_misses.misses[parent_key]
-	mut second_parent := flat.TypeTextListBindings{}
+	mut second_parent := SpecializationArgsBindings{}
 	second_parent.set_ids('Second_string', [flat.source_type_string])
-	assert first_parent.ids.len == second_parent.ids.len
+	assert first_parent.len == second_parent.len
 	t.generic_specialization_args_parent = &second_parent
 	assert t.recorded_type_specialization_args(parent_key) or { []u32{} } == [flat.source_type_string]
 	assert t.recorded_generic_specialization_args('Second_string') or { []u32{} } == [flat.source_type_string]
@@ -1308,6 +1312,11 @@ fn test_numeric_specialized_type_decoder_preserves_cached_argument_storage() {
 	mut tc := types.TypeChecker.new(&a)
 	tc.struct_generic_params['Box'] = ['T']
 	mut t := new_transformer(mut a, &tc, map[string]bool{})
+	// prepare allocates the decode cache; without it misses are not recorded.
+	t.generic_spec_decode_cache = &TypeLookupCache{
+		entries: map[u32]u32{}
+		misses:  map[u32]bool{}
+	}
 	name := flat.source_type_id('Box_int')
 	mut args := t.decode_single_generic_specialized_type_args(name) or { panic('missing decoded arguments') }
 	assert args == [flat.source_type_int]
@@ -1317,4 +1326,42 @@ fn test_numeric_specialized_type_decoder_preserves_cached_argument_storage() {
 	missing := flat.source_type_id('NotMaterialized')
 	assert t.decode_single_generic_specialized_type_args(missing) == none
 	assert t.generic_spec_decode_cache.misses[missing]
+}
+
+fn test_void_pointer_staging_keeps_pointer_typed_nil_initializer() {
+	mut a := flat.FlatAst.new()
+	mut tc := types.TypeChecker.new(&a)
+	mut t := new_transformer(mut a, &tc, map[string]bool{})
+	pointer_type := flat.source_type_voidptr
+	decl_id := t.make_staging_value_decl('pointer_result', pointer_type)
+	decl := t.a.node(decl_id)
+	lhs := t.a.child_node(decl, 0)
+	rhs := t.a.child_node(decl, 1)
+	assert lhs.typ == pointer_type
+	assert rhs.kind == .nil_literal
+}
+
+fn test_generic_argument_qualification_preserves_all_main_named_types() {
+	path := os.join_path(os.vtmp_dir(), 'generic_main_named_types_${os.getpid()}.v')
+	os.write_file(path, 'module main
+type File = int
+enum Kind { one two }
+interface Reader { read() int }
+struct Data {}
+type Choice = int | string
+')!
+	defer { os.rm(path) or {} }
+	mut p := parser.Parser.new(pref.new_preferences())
+	mut a := p.parse_file(path)
+	assert p.diagnostics.len == 0, p.diagnostics.str()
+	mut tc := types.TypeChecker.new(a)
+	tc.collect(a)
+	mut t := new_transformer(mut a, &tc, map[string]bool{})
+	for module_name in ['', 'main'] {
+		t.cur_module = module_name
+		for name in ['File', 'Kind', 'Reader', 'Data', 'Choice'] {
+			t.qualified_types.set(name, 'foreign.' + name)
+			assert flat.source_type_name(t.qualify_generic_arg_for_decl_module(flat.source_type_id(name), module_name)) == name
+		}
+	}
 }

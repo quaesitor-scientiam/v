@@ -27,6 +27,7 @@ const macos_v3_private_environment_names = [
 	'V3_CRUN_BUILD_IDENTITY',
 	'V3_INTERNAL_RESTART',
 	'V3_INTERNAL_CACHE_RECOVERY',
+	'V3_INTERNAL_CACHE_FORCE_SOURCE',
 	macos_v3_caller_vexe_env,
 	macos_v3_caller_vexe_present_env,
 	macos_v3_caller_vchild_env,
@@ -186,7 +187,13 @@ pub fn host_target() Target {
 
 // default_thread_stack_size returns the target-specific spawned-thread stack size.
 pub fn (target Target) default_thread_stack_size() int {
-	return if target.pointer_bits == 32 { 2 * 1024 * 1024 } else { 8 * 1024 * 1024 }
+	return default_thread_stack_size_for_bits(target.pointer_bits)
+}
+
+// default_thread_stack_size_for_bits returns the spawned-thread stack size for a
+// target with `pointer_bits`-bit pointers.
+pub fn default_thread_stack_size_for_bits(pointer_bits int) int {
+	return if pointer_bits == 32 { 2 * 1024 * 1024 } else { 8 * 1024 * 1024 }
 }
 
 // target_from validates and canonicalizes an OS/architecture pair.
@@ -1030,6 +1037,12 @@ pub fn is_test_file_for_backend(path string, backend string) bool {
 	if suffix_is_backend_name(backend_suffix) {
 		// A backend name wins over an architecture alias: `wasm` spells both, and
 		// `foo_test.wasm.v` is a WASM backend test, not an amd64/arm64 one.
+		if backend_suffix == 'native' {
+			// `.native.v` is the backend-specific file suffix for ARM64 code.
+			// The CLI uses `-b arm64`; keep suffix selection independent of the
+			// removed `-b native` option.
+			return backend in ['native', 'arm64']
+		}
 		return backend_suffix == backend
 	}
 	if _ := arch_from_string(backend_suffix) {
@@ -1219,6 +1232,28 @@ pub fn normalized_arch(target_arch string) string {
 		'wasm' { 'wasm32' }
 		else { target_arch }
 	}
+}
+
+// directive_target_os returns the operating system a `#flag` or `#include` target
+// prefix (`#flag linux -lm`) names, or none when the word is not such a prefix.
+pub fn directive_target_os(prefix string) ?string {
+	normalized := normalized_os(prefix)
+	if normalized in ['windows', 'macos', 'linux', 'freebsd', 'openbsd', 'netbsd', 'dragonfly',
+		'android', 'termux', 'ios', 'solaris', 'qnx', 'haiku', 'serenity', 'vinix', 'wasm32_emscripten'] {
+		return normalized
+	}
+	return none
+}
+
+// directive_target_arch returns the architecture a `#flag` or `#include` target
+// prefix (`#flag amd64 -msse2`) names, or none when the word is not such a prefix.
+pub fn directive_target_arch(prefix string) ?string {
+	normalized := normalized_arch(prefix)
+	if normalized in ['amd64', 'arm64', 'x86', 'arm32', 'riscv32', 'riscv64', 'ppc', 'ppc64', 'ppc64le',
+		's390x', 'loongarch64', 'sparc64', 'wasm32'] {
+		return normalized
+	}
+	return none
 }
 
 // normalized_target_os supports normalized target os handling for Preferences.

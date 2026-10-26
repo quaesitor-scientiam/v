@@ -3,6 +3,11 @@
 `builtin` is a module that is implicitly imported by every V program.
 
 It implements the builtin V types `array`, `string`, `map`.
+`int` and `uint` use the pointer width of the target. The old `isize` and `usize`
+names are deprecated in favor of `int` and `uint`. For signed pointer-width C
+parameters and return values, `C.ptrdiff_t` aliases `int` and preserves the C ABI.
+Generated C defines the target-independent names `__v_int` and `__v_uint` for C code
+in the same translation unit, and keeps the `isize`/`usize` C typedefs.
 With bounds checking enabled, `first()` and `last()` on an empty dynamic array panic with
 `array.first: array is empty` and `array.last: array is empty`, respectively.
 This also applies when writing through the returned element, such as `cells.last().field = value`.
@@ -12,6 +17,11 @@ For floating point elements, NaNs follow all other values. Equal signed zeros an
 keep their original order; an explicit comparison controls its own ordering.
 Maps with empty struct values support growth, reservation, and deletion with every C compiler,
 including compilers where the empty struct occupies zero bytes.
+Deleting a map entry clears its stored value so it no longer keeps that value's allocations
+reachable by the garbage collector. Values referenced elsewhere remain valid.
+
+Mutable map receivers can update nested struct fields through array elements, including
+when the map value and array element structs use `@[heap]`.
 It also includes Unicode-aware string helpers such as `string.graphemes()`
 for splitting text into grapheme clusters.
 The `.string()` method converts dynamic and fixed arrays of runes to UTF-8 strings,
@@ -96,7 +106,7 @@ ensure no allocation from a rewound or freed scope remains in use.
 
 `prealloc_scope_allocated_size(scope)` reports the bytes in all allocation blocks owned by a
 scope, excluding allocator metadata and address gaps between blocks. It returns zero for a nil
-scope and saturates at `usize`'s maximum on overflow. This query is unsafe: no thread may add or
+scope and saturates at `uint`'s maximum on overflow. This query is unsafe: no thread may add or
 remove blocks while it runs.
 
 `string.replace_each(pairs)` ignores pairs with an empty search string. An empty replacement
