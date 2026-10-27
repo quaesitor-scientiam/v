@@ -7,13 +7,12 @@ $if freebsd || openbsd {
 $if tinyc {
 	#flag -DSQLITE_DISABLE_INTRINSIC
 }
+$if windows && tinyc {
+	#flag -D_WIN32_WINNT=0x0600
+}
 $if $pkgconfig('sqlite3') {
 	#pkgconfig sqlite3
 	#include "sqlite3.h" # The SQLite header file is missing. Please install the corresponding development package.
-} $else $if windows {
-	#flag -I@VEXEROOT/thirdparty/sqlite
-	#flag @VEXEROOT/thirdparty/sqlite/sqlite3.o
-	#include "sqlite3.h" # The SQLite header file is missing. Please run vlib/db/sqlite/install_thirdparty_sqlite.vsh to download an SQLite amalgamation.
 } $else $if darwin {
 	// macOS ships libsqlite3, so do not require a separately downloaded amalgamation.
 	#flag darwin -lsqlite3
