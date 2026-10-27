@@ -5,7 +5,7 @@
 // a socket. The Context is the same shape `sessions_ctx_test.v` uses.
 //
 // Note the neighbour `vlib/x/sessions/tests/db_store_test.v` cannot run in
-// this checkout: `db.sqlite` needs `thirdparty/sqlite/sqlite3.o`, which is
+// this checkout: `db.sqlite` needs `thirdparty/sqlite/sqlite3.c`, which is
 // not present, so that file fails to compile for an environmental reason
 // before any of its assertions run. Nothing here imports `db`.
 import net.http

@@ -2395,9 +2395,8 @@ pub fn (mut g FlatGen) set_cached_support_declarations(source string) {
 }
 
 // cache_native_flag_input_files returns the native sources and objects that `#flag`
-// directives name outright, for example `#flag @VEXEROOT/thirdparty/sqlite/sqlite3.c` or the
-// prebuilt `sqlite3.o` used on Windows. These inputs complement include directives;
-// neither path resolver reads native file contents.
+// directives name outright, for example `#flag @VEXEROOT/thirdparty/sqlite/sqlite3.c`.
+// These inputs complement include directives; neither path resolver reads native file contents.
 //
 // Only directives that survive comptime branch resolution are seen, so a `#flag` guarded by
 // an `$if` for another platform is correctly left out.

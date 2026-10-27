@@ -517,9 +517,8 @@ fn test_cross_embedding_stops_at_an_include_cycle() {
 }
 
 // A `#flag` can name a native source or object outright -- `vlib/db/sqlite/sqlite.c.v` builds
-// `@VEXEROOT/thirdparty/sqlite/sqlite3.c` that way, and uses a prebuilt `sqlite3.o` on
-// Windows. The include scan never sees those, so they need their own collection or a cached
-// build keeps running against a stale amalgamation.
+// `@VEXEROOT/thirdparty/sqlite/sqlite3.c` that way. The include scan never sees those, so they
+// need their own collection or a cached build keeps running against a stale amalgamation.
 fn test_native_flag_inputs_are_collected() {
 	dir := os.join_path(os.vtmp_dir(), 'v3_native_flag_inputs_${os.getpid()}')
 	os.rmdir_all(dir) or {}

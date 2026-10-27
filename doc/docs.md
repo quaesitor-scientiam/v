@@ -10907,10 +10907,11 @@ $if $pkgconfig('sqlite3') {
 	$if tinyc {
 		#flag -DSQLITE_DISABLE_INTRINSIC
 	}
-	$if windows {
-		#flag @VEXEROOT/thirdparty/sqlite/sqlite3.o
-	} $else {
-		#flag @VEXEROOT/thirdparty/sqlite/sqlite3.c
+	$if windows && tinyc {
+		#flag -D_WIN32_WINNT=0x0600
+	}
+	#flag @VEXEROOT/thirdparty/sqlite/sqlite3.c
+	$if linux {
 		#flag -lm
 	}
 }
